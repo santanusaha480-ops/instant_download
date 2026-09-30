@@ -35,3 +35,7 @@ For a public downloader, add rate limiting, per-IP quotas, request timeouts, log
 
 ## YouTube support
 The Docker image includes Deno and yt-dlp EJS support. Current yt-dlp releases require a JavaScript runtime plus yt-dlp-ejs for full YouTube extraction. Some YouTube formats/features can still require platform-issued tokens or access that the server cannot manufacture.
+
+
+### Audio fix
+The download endpoint now detects video-only formats (common on Instagram) and explicitly adds `bestaudio`, then lets FFmpeg mux/re-encode the result to MP4 before sending it to the browser. This avoids returning a video-only stream without sound.

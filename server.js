@@ -1,6 +1,8 @@
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const fs = require("fs");
+const os = require("os");
 const { spawn } = require("child_process");
 const { URL } = require("url");
 
@@ -32,27 +34,65 @@ function runYtDlp(args) {
   });
 }
 
-function runDownload(args, res, filenameFallback) {
-  const p = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
-  let err = "";
-  p.stderr.on("data", d => {
-    err += d.toString();
-    if (err.length > 12000) err = err.slice(-12000);
-  });
+async function runDownload(url, format, res, filenameFallback) {
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "instant-download-"));
+  const outputTemplate = path.join(tempDir, "media.%(ext)s");
+  const args = [
+    "-f", format,
+    "--no-playlist",
+    "--no-warnings",
+    "--merge-output-format", "mp4",
+    "--recode-video", "mp4",
+    "--force-overwrites",
+    "--socket-timeout", "20",
+    "--js-runtimes", "deno",
+    "--remote-components", "ejs:github",
+    "-o", outputTemplate,
+    url
+  ];
 
-  res.setHeader("Content-Disposition", `attachment; filename="${filenameFallback.replace(/"/g, "")}"`);
-  res.setHeader("Content-Type", "application/octet-stream");
-  p.stdout.pipe(res);
+  try {
+    await new Promise((resolve, reject) => {
+      const p = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = "";
+      p.stderr.on("data", d => {
+        stderr += d.toString();
+        if (stderr.length > 12000) stderr = stderr.slice(-12000);
+      });
+      p.on("error", reject);
+      p.on("close", code => {
+        if (code === 0) resolve();
+        else reject(new Error(stderr || `yt-dlp exited ${code}`));
+      });
+    });
 
-  p.on("error", e => {
-    if (!res.headersSent) res.status(500).json({ error: e.message });
-    else res.destroy(e);
-  });
-  p.on("close", code => {
-    if (code !== 0 && !res.headersSent) {
-      res.status(400).json({ error: "The source could not be downloaded by the server." });
+    const files = await fs.promises.readdir(tempDir);
+    const mediaFile = files.find(name => /\.mp4$/i.test(name));
+    if (!mediaFile) throw new Error("The server did not produce an MP4 file.");
+
+    const filePath = path.join(tempDir, mediaFile);
+    const stat = await fs.promises.stat(filePath);
+    const safeName = String(filenameFallback || "instant-download")
+      .replace(/[\\/:*?"<>|\r\n]/g, "_")
+      .slice(0, 150) || "instant-download";
+
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Length", stat.size);
+    res.setHeader("Content-Disposition", `attachment; filename="${safeName}.mp4"`);
+
+    res.sendFile(filePath, async (err) => {
+      await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      if (err && !res.headersSent) res.status(500).json({ error: "Could not send the downloaded video." });
+    });
+  } catch (e) {
+    await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    if (!res.headersSent) {
+      const detail = String(e.message || e).replace(/\s+/g, " ").slice(0, 600);
+      res.status(400).json({ error: `Download failed. ${detail}` });
+    } else {
+      res.destroy(e);
     }
-  });
+  }
 }
 
 app.post("/api/analyze", async (req, res) => {
@@ -100,7 +140,12 @@ app.post("/api/analyze", async (req, res) => {
       const q = f.has_video ? (f.height ? `${f.height}p` : "video") : "audio";
       if (!seen.has(q)) {
         seen.add(q);
-        qualities.push({ label: q, format_id: f.format_id });
+        qualities.push({
+          label: q,
+          format_id: f.format_id,
+          has_audio: Boolean(f.has_audio),
+          has_video: Boolean(f.has_video)
+        });
       }
     }
 
@@ -123,42 +168,31 @@ app.post("/api/analyze", async (req, res) => {
 });
 
 app.post("/api/download", async (req, res) => {
-  const { url, formatId, quality, audioOnly } = req.body || {};
+  const { url, formatId, quality, audioOnly, hasAudio } = req.body || {};
   if (!validHttpUrl(url)) return res.status(400).json({ error: "Enter a valid URL." });
 
-  // formatId comes from /api/analyze. Never accept arbitrary shell fragments.
-  if (formatId && !/^[A-Za-z0-9._+-]+$/.test(String(formatId))) {
+  if (formatId && !/^[A-Za-z0-9._+\-]+$/.test(String(formatId))) {
     return res.status(400).json({ error: "Invalid format." });
   }
 
   try {
-    let format = formatId;
-    if (!format) {
-      if (audioOnly) format = "bestaudio";
-      else if (/^\d+p$/.test(String(quality || ""))) {
-        const h = Number(String(quality).replace("p",""));
-        format = `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]`;
-      } else {
-        format = "bestvideo+bestaudio/best";
-      }
+    let format;
+    if (audioOnly) {
+      format = "bestaudio";
+    } else if (formatId) {
+      // Instagram and many other sites expose separate video/audio streams.
+      // If the selected format is video-only, explicitly add the best audio stream.
+      format = hasAudio ? String(formatId) : `${formatId}+bestaudio/best`;
+    } else if (/^\d+p$/.test(String(quality || ""))) {
+      const h = Number(String(quality).replace("p", ""));
+      format = `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]`;
+    } else {
+      format = "bestvideo*+bestaudio/best";
     }
 
-    // -o - streams the resulting media to the HTTP response.
-    // merge-output-format works when FFmpeg is installed in the Railway image.
-    const args = [
-      "-f", format,
-      "--no-playlist",
-      "--no-warnings",
-      "--merge-output-format", "mp4",
-      "--recode-video", "mp4",
-      "--socket-timeout", "20",
-      "--js-runtimes", "deno",
-      "--remote-components", "ejs:github",
-      "-o", "-"
-    ];
-
-    runDownload([...args, url], res, "instant-download.mp4");
-  } catch {
+    const title = String(req.body.title || "instant-download");
+    await runDownload(url, format, res, title);
+  } catch (e) {
     if (!res.headersSent) res.status(500).json({ error: "Download failed." });
   }
 });
