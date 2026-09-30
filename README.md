@@ -41,5 +41,7 @@ The Docker image includes Deno and yt-dlp EJS support. Current yt-dlp releases r
 The download endpoint now detects video-only formats (common on Instagram) and explicitly adds `bestaudio`, then lets FFmpeg mux/re-encode the result to MP4 before sending it to the browser. This avoids returning a video-only stream without sound.
 
 
-### Instagram audio fix (v2)
-The download endpoint no longer trusts a client-selected format ID for video downloads. It explicitly requests a video stream plus an audio stream and uses FFmpeg to produce MP4. The server then uses ffprobe to verify that the final MP4 contains an audio stream; if the source exposes no downloadable audio, it returns a clear error instead of silently delivering a silent video.
+## Instagram audio handling
+The downloader now treats audio as part of the same source post. For Instagram video downloads it requests the selected video together with the best audio stream exposed by that exact Instagram post, then uses FFmpeg to produce the final MP4. It also runs `ffprobe` on the final file and refuses to return a silent MP4 if no audio stream is present. It does not generate, replace, or download unrelated audio.
+
+If Instagram/yt-dlp exposes the post as video-only with no accessible audio stream, the server reports that condition instead of silently returning a video without sound.

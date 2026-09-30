@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Instant Download — Simple Media Downloader</title>
+<style>
+:root{--bg:#f5f9ff;--card:#fff;--text:#10213a;--muted:#64748b;--blue:#1769ff;--blue2:#0d55d9;--border:#dbe6f5;--soft:#edf4ff;--shadow:0 18px 50px rgba(32,83,150,.12)}
+[data-theme="dark"]{--bg:#08111f;--card:#101c2d;--text:#eef5ff;--muted:#9aabc2;--blue:#4f8cff;--blue2:#2d70ed;--border:#24354d;--soft:#14243a;--shadow:0 18px 50px rgba(0,0,0,.3)}
+*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+header{height:72px;border-bottom:1px solid var(--border);background:var(--card);display:flex;align-items:center;justify-content:space-between;padding:0 6%;position:sticky;top:0;z-index:10}
+.logo{font-size:22px;font-weight:800;letter-spacing:-.5px}.logo span{color:var(--blue)}
+.actions{display:flex;gap:10px}.theme{border:1px solid var(--border);background:var(--card);color:var(--text);border-radius:12px;padding:10px 13px;cursor:pointer}
+main{max-width:1000px;margin:0 auto;padding:72px 20px 50px}.hero{text-align:center;max-width:760px;margin:auto}.badge{display:inline-block;background:var(--soft);color:var(--blue);font-weight:700;padding:8px 13px;border-radius:999px;font-size:13px}
+h1{font-size:clamp(36px,7vw,66px);line-height:1.02;margin:18px 0 14px;letter-spacing:-2px}h1 span{color:var(--blue)}
+.hero p{color:var(--muted);font-size:17px;line-height:1.6;margin:0 auto 30px}
+.box{background:var(--card);border:1px solid var(--border);border-radius:22px;padding:14px;box-shadow:var(--shadow)}
+.controls{display:grid;grid-template-columns:1fr 160px 125px;gap:10px}
+input,select{width:100%;height:54px;border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:14px;padding:0 16px;font-size:15px;outline:none}
+input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(23,105,255,.12)}
+button.primary{height:54px;border:0;border-radius:14px;background:var(--blue);color:white;font-weight:800;cursor:pointer}
+button.primary:hover{background:var(--blue2)}
+.note{font-size:12px;color:var(--muted);margin:12px 4px 0}
+.panel{display:none;margin-top:18px;background:var(--card);border:1px solid var(--border);border-radius:20px;padding:20px}
+.panel.show{display:block}.loading{text-align:center;padding:20px;color:var(--muted)}.spinner{width:24px;height:24px;border:3px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 10px}@keyframes spin{to{transform:rotate(360deg)}}
+.result{display:grid;grid-template-columns:1fr 1fr;gap:18px}.preview{background:var(--soft);border-radius:16px;padding:18px}.preview h3{margin:0 0 8px}.preview p{color:var(--muted);font-size:14px}
+.quality{display:flex;flex-direction:column;gap:10px}.quality button{height:46px;border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:12px;cursor:pointer;text-align:left;padding:0 14px;font-weight:700}.quality button:hover{border-color:var(--blue);color:var(--blue)}
+.features{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:42px}.feature{background:var(--card);border:1px solid var(--border);padding:20px;border-radius:18px}.icon{font-size:24px}.feature b{display:block;margin:10px 0 6px}.feature span{font-size:13px;color:var(--muted);line-height:1.5}
+footer{text-align:center;color:var(--muted);font-size:12px;padding:25px}
+@media(max-width:720px){header{padding:0 18px}.controls{grid-template-columns:1fr}.result{grid-template-columns:1fr}.features{grid-template-columns:1fr}main{padding-top:45px}}
+</style>
+</head>
+<body>
+<header><div class="logo">Instant <span>Download</span></div><div class="actions"><button class="theme" id="themeBtn">☾ Dark</button></div></header>
+<main>
+<section class="hero">
+<div class="badge">Fast • Simple • No account</div>
+<h1>Download your <span>authorized</span> media.</h1>
+<p>Paste a supported direct media link, choose its source and inspect available quality options. Designed for a clean mobile-first experience.</p>
+<div class="box">
+<div class="controls">
+<input id="url" type="url" placeholder="Paste your media link here…" autocomplete="off">
+<select id="source"><option value="auto">Auto detect</option><option>YouTube</option><option>Spotify</option><option>Instagram</option><option>Pinterest</option><option>Direct file</option></select>
+<button class="primary" id="analyze">Analyze</button>
+</div>
+<div class="note">Only download content you own or have permission to save. Platform restrictions and copyright rules still apply.</div>
+</div>
+<div class="panel" id="panel">
+<div class="loading" id="loading"><div class="spinner"></div>Checking the link…</div>
+<div class="result" id="result" style="display:none">
+<div class="preview"><h3 id="title">Media ready</h3><p id="details">Choose an available format and quality.</p><p id="status"></p></div>
+<div class="quality">
+<button data-quality="Original">Original / source quality</button>
+<button data-quality="1080p">1080p — where available</button>
+<button data-quality="720p">720p — where available</button>
+<button data-quality="480p">480p — where available</button>
+</div>
+</div>
+</div>
+</section>
+<section class="features">
+<div class="feature"><div class="icon">⚡</div><b>Simple workflow</b><span>Paste → analyze → choose an available quality → save.</span></div>
+<div class="feature"><div class="icon">📱</div><b>Mobile friendly</b><span>Responsive controls designed for phones, tablets and desktop browsers.</span></div>
+<div class="feature"><div class="icon">🌓</div><b>Light & dark</b><span>Switch appearance instantly and keep your preference on the device.</span></div>
+</section>
+</main>
+<footer>Instant Download UI prototype • No login required • Use only with content you are authorized to download.</footer>
+<script>
+const root=document.documentElement, themeBtn=document.getElementById('themeBtn');
+const saved=localStorage.getItem('mediafetch-theme')||'light'; root.dataset.theme=saved;
+function paint(){themeBtn.textContent=root.dataset.theme==='dark'?'☀ Light':'☾ Dark'} paint();
+themeBtn.onclick=()=>{root.dataset.theme=root.dataset.theme==='dark'?'light':'dark';localStorage.setItem('mediafetch-theme',root.dataset.theme);paint()};
+
+const analyze=document.getElementById('analyze'), panel=document.getElementById('panel'), loading=document.getElementById('loading'), result=document.getElementById('result');
+let mediaInfo=null;
+function setStatus(msg, ok=true){
+ const status=document.getElementById('status');
+ status.textContent=msg; status.style.color=ok?'var(--blue)':'#d33';
+}
+analyze.onclick=async()=>{
+ const url=document.getElementById('url').value.trim(), source=document.getElementById('source').value;
+ if(!url){alert('Paste a media link first.');return}
+ panel.classList.add('show');loading.style.display='block';result.style.display='none';
+ try{
+   const r=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,source})});
+   const data=await r.json();
+   if(!r.ok) throw new Error(data.error||'Could not analyze this link.');
+   mediaInfo=data;
+   loading.style.display='none';result.style.display='grid';
+   document.getElementById('title').textContent=data.title||'Media ready';
+   document.getElementById('details').textContent=
+     [data.uploader,data.extractor,data.duration?`${Math.round(data.duration)} sec`:null].filter(Boolean).join(' • ') || 'Available formats found.';
+   const q=document.querySelector('.quality');
+   q.innerHTML='';
+   (data.qualities||[]).forEach(item=>{
+     const b=document.createElement('button');
+     b.dataset.format=item.format_id;
+     b.textContent=item.label;
+     b.onclick=()=>download(item.format_id,item.label,item.has_audio);
+     q.appendChild(b);
+   });
+   if(!q.children.length) setStatus('No downloadable formats were returned.',false);
+ }catch(e){
+   loading.style.display='none';result.style.display='grid';
+   document.getElementById('title').textContent='Could not analyze';
+   document.getElementById('details').textContent=e.message;
+   document.querySelector('.quality').innerHTML='';
+   setStatus('Try another public/authorized media URL.',false);
+ }
+};
+async function download(formatId,label,hasAudio){
+ const url=document.getElementById('url').value.trim();
+ setStatus(`Preparing ${label}…`);
+ try{
+   const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,formatId,quality:label,hasAudio,title:mediaInfo?.title||'instant-download'})});
+   if(!r.ok){const e=await r.json().catch(()=>({})); throw new Error(e.error||'Download failed.');}
+   const blob=await r.blob();
+   const a=document.createElement('a');
+   a.href=URL.createObjectURL(blob);
+   a.download=(mediaInfo?.title||'instant-download').replace(/[\\/:*?"<>|]/g,'_')+'.mp4';
+   document.body.appendChild(a);a.click();a.remove();
+   URL.revokeObjectURL(a.href);
+   setStatus('Download started. Check your browser Downloads folder.');
+ }catch(e){setStatus(e.message,false);}
+}
+</script>
+</body>
+</html>

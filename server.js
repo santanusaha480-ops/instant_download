@@ -37,8 +37,7 @@ function runYtDlp(args) {
 async function runDownload(url, format, res, filenameFallback) {
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "instant-download-"));
   const outputTemplate = path.join(tempDir, "media.%(ext)s");
-  const args = [
-    "-f", format,
+  const baseArgs = [
     "--no-playlist",
     "--no-warnings",
     "--merge-output-format", "mp4",
@@ -50,53 +49,71 @@ async function runDownload(url, format, res, filenameFallback) {
     "--js-runtimes", "deno",
     "--remote-components", "ejs:github",
     "-o", outputTemplate,
-    url
   ];
 
-  try {
-    await new Promise((resolve, reject) => {
+  async function execute(selector) {
+    const args = ["-f", selector, ...baseArgs, url];
+    return await new Promise((resolve, reject) => {
       const p = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
-      let stderr = "";
+      let stderr = "", stdout = "";
+      p.stdout.on("data", d => { stdout += d.toString(); });
       p.stderr.on("data", d => {
         stderr += d.toString();
-        if (stderr.length > 20000) stderr = stderr.slice(-20000);
+        if (stderr.length > 16000) stderr = stderr.slice(-16000);
       });
       p.on("error", reject);
-      p.on("close", code => {
-        if (code === 0) resolve();
-        else reject(new Error(stderr || `yt-dlp exited ${code}`));
-      });
+      p.on("close", code => code === 0 ? resolve({ stdout, stderr }) : reject(new Error(stderr || stdout || `yt-dlp exited ${code}`)));
     });
+  }
 
-    let files = await fs.promises.readdir(tempDir);
-    let mediaFile = files.find(name => /\.mp4$/i.test(name));
-    if (!mediaFile) throw new Error("The server did not produce an MP4 file.");
+  async function findMp4WithAudio() {
+    const files = await fs.promises.readdir(tempDir);
+    for (const name of files.filter(n => /\.mp4$/i.test(n))) {
+      const filePath = path.join(tempDir, name);
+      try {
+        const probe = await new Promise((resolve, reject) => {
+          const p = spawn("ffprobe", [
+            "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=codec_name,channels,duration",
+            "-of", "json", filePath
+          ], { stdio: ["ignore", "pipe", "pipe"] });
+          let out = "", err = "";
+          p.stdout.on("data", d => out += d.toString());
+          p.stderr.on("data", d => err += d.toString());
+          p.on("error", reject);
+          p.on("close", code => code === 0 ? resolve(JSON.parse(out || "{}")) : reject(new Error(err || "ffprobe failed")));
+        });
+        if (Array.isArray(probe.streams) && probe.streams.length > 0) return filePath;
+      } catch (_) {}
+    }
+    return null;
+  }
 
-    // Verify the final MP4 actually contains an audio stream. Some sites expose
-    // video and audio separately, so a successful download is not enough.
-    const filePath = path.join(tempDir, mediaFile);
-    let probe = "";
+  try {
+    // The selected format and its companion audio are always extracted from
+    // the SAME source URL. We never generate or substitute an audio track.
+    // First use the requested selector. If it produces a video without an
+    // audio stream, retry with the site's best combined A/V representation.
     try {
-      probe = await new Promise((resolve, reject) => {
-        const p = spawn("ffprobe", [
-          "-v", "error",
-          "-select_streams", "a:0",
-          "-show_entries", "stream=codec_name",
-          "-of", "default=noprint_wrappers=1:nokey=1",
-          filePath
-        ], { stdio: ["ignore", "pipe", "pipe"] });
-        let out = "", err = "";
-        p.stdout.on("data", d => out += d.toString());
-        p.stderr.on("data", d => err += d.toString());
-        p.on("error", reject);
-        p.on("close", code => code === 0 ? resolve(out.trim()) : reject(new Error(err || "ffprobe failed")));
-      });
-    } catch (_) {
-      probe = "";
+      await execute(format);
+    } catch (firstError) {
+      await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      throw firstError;
     }
 
-    if (!probe) {
-      throw new Error("The source returned a video without an audio stream. The site may not expose downloadable audio for this post.");
+    let filePath = await findMp4WithAudio();
+    if (!filePath) {
+      // Clean failed/partial output and ask yt-dlp for the best format that
+      // already contains both video and the audio belonging to this post.
+      for (const name of await fs.promises.readdir(tempDir)) {
+        await fs.promises.rm(path.join(tempDir, name), { force: true }).catch(() => {});
+      }
+      await execute("best[hasvid][hasaud]/best");
+      filePath = await findMp4WithAudio();
+    }
+
+    if (!filePath) {
+      throw new Error("Instagram did not expose an audio stream for this post. The server will not invent or substitute audio.");
     }
 
     const stat = await fs.promises.stat(filePath);
@@ -196,30 +213,35 @@ app.post("/api/analyze", async (req, res) => {
 });
 
 app.post("/api/download", async (req, res) => {
-  const { url, quality, audioOnly } = req.body || {};
+  const { url, formatId, quality, audioOnly, hasAudio } = req.body || {};
   if (!validHttpUrl(url)) return res.status(400).json({ error: "Enter a valid URL." });
+
+  if (formatId && !/^[A-Za-z0-9._+\-]+$/.test(String(formatId))) {
+    return res.status(400).json({ error: "Invalid format." });
+  }
 
   try {
     let format;
     if (audioOnly) {
-      format = "bestaudio/best";
+      format = "bestaudio";
     } else if (/^\d+p$/.test(String(quality || ""))) {
       const h = Number(String(quality).replace("p", ""));
-      // Always select a video-only stream PLUS an audio-only stream.
-      // This avoids the common Instagram case where the chosen MP4 contains video only.
-      format = `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]/bestvideo+bestaudio/best`;
+      // Explicitly request video + the best audio stream exposed by THIS
+      // Instagram post, with a combined A/V fallback at the same height.
+      format = `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]`;
+    } else if (formatId) {
+      // The format id comes from this exact post's extractor result. Always
+      // pair video-only formats with audio from the same post. Do not use
+      // external/generated audio.
+      format = `${String(formatId)}+bestaudio/best`;
     } else {
-      // Original/source quality: explicitly merge best video + best audio.
-      format = "bestvideo+bestaudio/best";
+      format = "bestvideo*+bestaudio/best";
     }
 
     const title = String(req.body.title || "instant-download");
     await runDownload(url, format, res, title);
   } catch (e) {
-    if (!res.headersSent) {
-      const detail = String(e.message || e).replace(/\s+/g, " ").slice(0, 800);
-      res.status(500).json({ error: `Download failed. ${detail}` });
-    }
+    if (!res.headersSent) res.status(500).json({ error: "Download failed." });
   }
 });
 
