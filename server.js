@@ -160,6 +160,6 @@ app.post("/api/download", async (req, res) => {
 
 app.get("/api/health", (req, res) => res.json({ ok: true, service: "instant-download" }));
 
-app.get("*", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
+app.use((req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 app.listen(PORT, () => console.log(`Instant Download listening on ${PORT}`));
