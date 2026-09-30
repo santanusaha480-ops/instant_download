@@ -65,7 +65,9 @@ app.post("/api/analyze", async (req, res) => {
       "--no-playlist",
       "--no-warnings",
       "--skip-download",
-      "--socket-timeout", "15",
+      "--socket-timeout", "20",
+      "--js-runtimes", "deno",
+      "--remote-components", "ejs:github",
       url
     ]);
     const info = JSON.parse(raw);
@@ -113,8 +115,9 @@ app.post("/api/analyze", async (req, res) => {
       formats: formats.slice(0, 80)
     });
   } catch (e) {
+    const detail = String(e.message || e).replace(/\s+/g, " ").slice(0, 500);
     res.status(400).json({
-      error: "This URL is unsupported, private, blocked, DRM-protected, or unavailable to the server."
+      error: `The source could not be analyzed. ${detail}`
     });
   }
 });
@@ -149,6 +152,8 @@ app.post("/api/download", async (req, res) => {
       "--merge-output-format", "mp4",
       "--recode-video", "mp4",
       "--socket-timeout", "20",
+      "--js-runtimes", "deno",
+      "--remote-components", "ejs:github",
       "-o", "-"
     ];
 

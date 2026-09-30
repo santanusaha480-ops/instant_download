@@ -31,3 +31,7 @@ Then open http://localhost:3000
 
 ## Production notes
 For a public downloader, add rate limiting, per-IP quotas, request timeouts, logging, abuse monitoring, and a queue/worker architecture before exposing it broadly.
+
+
+## YouTube support
+The Docker image includes Deno and yt-dlp EJS support. Current yt-dlp releases require a JavaScript runtime plus yt-dlp-ejs for full YouTube extraction. Some YouTube formats/features can still require platform-issued tokens or access that the server cannot manufacture.
