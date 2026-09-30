@@ -228,14 +228,16 @@ app.post("/api/download", async (req, res) => {
       const h = Number(String(quality).replace("p", ""));
       // Explicitly request video + the best audio stream exposed by THIS
       // Instagram post, with a combined A/V fallback at the same height.
-      format = `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]`;
+      format = `bestvideo*[height<=${h}]+?bestaudio/best[height<=${h}]/best`;
     } else if (formatId) {
       // The format id comes from this exact post's extractor result. Always
       // pair video-only formats with audio from the same post. Do not use
       // external/generated audio.
-      format = `${String(formatId)}+bestaudio/best`;
+      format = /^\d+$/.test(String(formatId || "")) && hasAudio === true
+        ? String(formatId)
+        : `${String(formatId || "bestvideo*")}+?bestaudio/best`;
     } else {
-      format = "bestvideo*+bestaudio/best";
+      format = "bestvideo*+?bestaudio/best";
     }
 
     const title = String(req.body.title || "instant-download");
