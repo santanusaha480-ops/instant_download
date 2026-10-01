@@ -5,7 +5,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Use pip-installed yt-dlp so its current Python plugin system is available.
-RUN python3 -m pip install --break-system-packages --no-cache-dir -U yt-dlp yt-dlp-getpot-wpc
+RUN python3 -m pip install --break-system-packages --no-cache-dir -U yt-dlp yt-dlp-getpot-wpc curl_cffi
 
 # Deno is used by yt-dlp for YouTube JavaScript challenges.
 RUN curl -L https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
@@ -25,7 +25,7 @@ USER appuser
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV YTDLP_CHROME_PATH=/usr/bin/chromium
-ENV INSTAGRAM_GRAPHQL_DOC_ID=27128499623469141
+ENV INSTAGRAM_GRAPHQL_DOC_IDS=27128499623469141
 EXPOSE 3000
 
 CMD ["npm", "start"]

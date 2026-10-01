@@ -105,10 +105,37 @@ function bestInstagramImageFromNode(node) {
   return candidates[0]?.url || null;
 }
 
+async function runInstagramHelper(mode, payload, timeoutMs = 30000) {
+  return await new Promise((resolve) => {
+    const p = spawn('python3', [path.join(__dirname, 'instagram_public.py'), mode], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '', err = '', done = false;
+    const timer = setTimeout(() => { try { p.kill('SIGKILL'); } catch (_) {} finish({ ok: false, error: 'Instagram helper timed out.' }); }, timeoutMs);
+    const finish = (value) => { if (done) return; done = true; clearTimeout(timer); resolve(value); };
+    p.stdout.on('data', d => { out += d.toString(); if (out.length > 1000000) out = out.slice(-1000000); });
+    p.stderr.on('data', d => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
+    p.on('error', e => finish({ ok: false, error: e.message }));
+    p.on('close', code => {
+      if (done) return;
+      try { finish(JSON.parse(out || '{}')); }
+      catch (_) { finish({ ok: false, error: err || `Instagram helper exited ${code}` }); }
+    });
+    p.stdin.end(JSON.stringify(payload || {}));
+  });
+}
+
 async function extractInstagramGraphqlMedia(url) {
   if (!isInstagramUrl(url)) return { imageUrls: [], title: '', uploader: '', mediaType: '' };
   const shortcode = instagramPostCode(url);
   if (!shortcode) return { imageUrls: [], title: '', uploader: '', mediaType: '' };
+
+  // Primary path: curl_cffi impersonates a real Chrome TLS fingerprint.
+  // Instagram has recently returned data:null to ordinary Node requests even
+  // for public posts, while this browser-like request can still receive the
+  // public media response.
+  const browserApi = await runInstagramHelper('extract', { shortcode }, 30000);
+  if (browserApi?.ok && Array.isArray(browserApi.images) && browserApi.images.length) {
+    return { imageUrls: browserApi.images.slice(0, MAX_CAROUSEL_ITEMS), title: browserApi.title || 'Instagram post', uploader: browserApi.uploader || '', mediaType: browserApi.images.length > 1 ? 'carousel' : 'image' };
+  }
 
   const ua = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
   const baseHeaders = {
@@ -481,10 +508,41 @@ function imageFetchCandidates(value) {
   return [...new Set(out)];
 }
 
+async function sendImageFiles(res, tempDir, files, filenameFallback) {
+  const safeName = String(filenameFallback || "instant-image")
+    .replace(/[\\/:*?"<>|\r\n]/g, "_").slice(0, 120) || "instant-image";
+  if (files.length === 1) {
+    const ext = path.extname(files[0]).toLowerCase() || ".jpg";
+    const stat = await fs.promises.stat(files[0]);
+    res.setHeader("Content-Type", ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : ext === ".gif" ? "image/gif" : "image/jpeg");
+    res.setHeader("Content-Length", stat.size);
+    setAttachmentFilename(res, safeName, ext);
+    return res.sendFile(files[0], async () => { await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {}); });
+  }
+  const zipPath = path.join(tempDir, `${safeName}.zip`);
+  await new Promise((resolve, reject) => {
+    const p = spawn("zip", ["-q", zipPath, ...files], { cwd: tempDir, stdio: ["ignore", "pipe", "pipe"] });
+    let err = ""; p.stderr.on("data", d => err += d.toString());
+    p.on("error", reject); p.on("close", code => code === 0 ? resolve() : reject(new Error(err || "zip failed")));
+  });
+  const stat = await fs.promises.stat(zipPath);
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Length", stat.size);
+  setAttachmentFilename(res, safeName, ".zip");
+  return res.sendFile(zipPath, async () => { await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {}); });
+}
+
 async function runImageDownload(imageUrls, res, filenameFallback, refererUrl = null) {
   const urls = [...new Set((imageUrls || []).filter(validHttpUrl))].slice(0, MAX_CAROUSEL_ITEMS);
   if (!urls.length) throw new Error("No public image was found in this post.");
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "instant-images-"));
+  if (refererUrl && isInstagramUrl(refererUrl)) {
+    const ig = await runInstagramHelper('download', { urls, outdir: tempDir, referer: refererUrl }, 90000);
+    if (ig?.ok && Array.isArray(ig.files) && ig.files.length === urls.length) {
+      return await sendImageFiles(res, tempDir, ig.files, filenameFallback);
+    }
+    // Continue to the normal fetch path if one CDN request failed.
+  }
   const safeName = String(filenameFallback || "instant-image")
     .replace(/[\\/:*?"<>|\r\n]/g, "_").slice(0, 120) || "instant-image";
   try {
@@ -511,38 +569,20 @@ async function runImageDownload(imageUrls, res, filenameFallback, refererUrl = n
       throw new Error(`Could not download image ${i + 1}${lastError ? `: ${lastError.message}` : ""}`);
     }));
     const files = fileResults;
-    if (files.length === 1) {
-      const ext = path.extname(files[0]).toLowerCase() || ".jpg";
-      const stat = await fs.promises.stat(files[0]);
-      res.setHeader("Content-Type", ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg");
-      res.setHeader("Content-Length", stat.size);
-      setAttachmentFilename(res, safeName, ext);
-      return res.sendFile(files[0], async () => { await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {}); });
-    }
-    const zipPath = path.join(tempDir, `${safeName}.zip`);
-    await new Promise((resolve, reject) => {
-      const p = spawn("zip", ["-q", zipPath, ...files], { cwd: tempDir, stdio: ["ignore", "pipe", "pipe"] });
-      let err = ""; p.stderr.on("data", d => err += d.toString());
-      p.on("error", reject); p.on("close", code => code === 0 ? resolve() : reject(new Error(err || "zip failed")));
-    });
-    const stat = await fs.promises.stat(zipPath);
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Length", stat.size);
-    setAttachmentFilename(res, safeName, ".zip");
-    res.sendFile(zipPath, async () => { await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {}); });
+    return await sendImageFiles(res, tempDir, files, filenameFallback);
   } catch (e) {
     await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     throw e;
   }
 }
 
-async function runDownload(url, format, res, filenameFallback) {
+async function runDownload(url, format, res, filenameFallback, audioOnly = false) {
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "instant-download-"));
   const outputTemplate = path.join(tempDir, "media.%(ext)s");
   const commonArgs = [
     "--no-playlist",
     "--no-warnings",
-    "--merge-output-format", "mp4",
+    ...(audioOnly ? ["--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"] : ["--merge-output-format", "mp4"]),
     "--force-overwrites",
     "--socket-timeout", isYouTubeUrl(url) ? "18" : "30",
     "--retries", isYouTubeUrl(url) ? "2" : "3",
@@ -565,6 +605,34 @@ async function runDownload(url, format, res, filenameFallback) {
       });
       p.on("error", reject);
       p.on("close", code => code === 0 ? resolve({ stdout, stderr }) : reject(new Error(stderr || stdout || `yt-dlp exited ${code}`)));
+    });
+  }
+
+  async function findAudioFile() {
+    const files = await fs.promises.readdir(tempDir);
+    const preferred = [".mp3", ".m4a", ".aac", ".opus", ".ogg", ".wav", ".webm"];
+    for (const ext of preferred) {
+      const name = files.find(n => n.toLowerCase().endsWith(ext));
+      if (!name) continue;
+      const filePath = path.join(tempDir, name);
+      try {
+        const stat = await fs.promises.stat(filePath);
+        if (stat.size > 1000) return filePath;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  async function sendAudioFile(filePath) {
+    const stat = await fs.promises.stat(filePath);
+    const ext = path.extname(filePath).toLowerCase();
+    const mime = ext === ".mp3" ? "audio/mpeg" : ext === ".m4a" ? "audio/mp4" : ext === ".opus" ? "audio/ogg" : "application/octet-stream";
+    res.setHeader("Content-Type", mime);
+    res.setHeader("Content-Length", stat.size);
+    setAttachmentFilename(res, filenameFallback, ext);
+    res.sendFile(filePath, async (err) => {
+      await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      if (err && !res.headersSent) res.status(500).json({ error: "Could not send the downloaded audio." });
     });
   }
 
@@ -592,6 +660,33 @@ async function runDownload(url, format, res, filenameFallback) {
   }
 
   try {
+    if (audioOnly) {
+      // Audio downloads are handled separately. The previous implementation
+      // always searched for an MP4 after yt-dlp finished, so an Instagram
+      // audio-only format was successfully downloaded but then discarded.
+      // Keep the exact audio format from this Reel and extract it to MP3.
+      try {
+        await execute(format, isYouTubeUrl(url));
+      } catch (firstError) {
+        if (!isYouTubeUrl(url)) throw firstError;
+        for (const name of await fs.promises.readdir(tempDir)) {
+          await fs.promises.rm(path.join(tempDir, name), { recursive: true, force: true }).catch(() => {});
+        }
+        await execute(format, false);
+      }
+      let audioPath = await findAudioFile();
+      if (!audioPath) {
+        for (const name of await fs.promises.readdir(tempDir)) {
+          await fs.promises.rm(path.join(tempDir, name), { recursive: true, force: true }).catch(() => {});
+        }
+        await execute("bestaudio/best", false);
+        audioPath = await findAudioFile();
+      }
+      if (!audioPath) throw new Error("No audio stream was available for this Reel.");
+      await sendAudioFile(audioPath);
+      return;
+    }
+
     // The selected format and its companion audio are always extracted from
     // the SAME source URL. We never generate or substitute an audio track.
     // First use the requested selector. If it produces a video without an
@@ -836,7 +931,7 @@ app.post("/api/download", async (req, res) => {
     }
 
     const title = String(req.body.title || "instant-download");
-    await runDownload(url, format, res, title);
+    await runDownload(url, format, res, title, Boolean(audioOnly));
   } catch (e) {
     if (!res.headersSent) res.status(500).json({ error: "Download failed." });
   }

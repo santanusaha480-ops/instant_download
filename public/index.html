@@ -91,7 +91,7 @@ analyze.onclick=async()=>{
      const b=document.createElement('button');
      b.dataset.format=item.format_id;
      b.textContent=item.label;
-     b.onclick=()=>download(item.format_id,item.label,item.has_audio);
+     b.onclick=()=>download(item.format_id,item.label,item.has_audio,!item.has_video);
      q.appendChild(b);
    });
    if(!q.children.length) setStatus('No downloadable formats were returned.',false);
@@ -103,11 +103,11 @@ analyze.onclick=async()=>{
    setStatus('Try a public post/pin, or another public/authorized URL.',false);
  }
 };
-async function download(formatId,label,hasAudio){
+async function download(formatId,label,hasAudio,audioOnly=false){
  const url=document.getElementById('url').value.trim();
  setStatus(`Preparing ${label}…`);
  try{
-   const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,formatId,quality:label,hasAudio,title:mediaInfo?.title||'instant-download',mediaType:mediaInfo?.media_type,imageUrls:mediaInfo?.image_urls||[]})});
+   const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,formatId,quality:label,hasAudio,audioOnly,title:mediaInfo?.title||'instant-download',mediaType:mediaInfo?.media_type,imageUrls:mediaInfo?.image_urls||[]})});
    if(!r.ok){const e=await r.json().catch(()=>({})); throw new Error(e.error||'Download failed.');}
    const blob=await r.blob();
    const a=document.createElement('a');
