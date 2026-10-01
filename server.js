@@ -5,6 +5,8 @@ const fs = require("fs");
 const os = require("os");
 const { spawn } = require("child_process");
 const { URL } = require("url");
+const dns = require("dns").promises;
+const net = require("net");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,6 +24,169 @@ function validHttpUrl(value) {
   } catch {
     return false;
   }
+}
+
+
+function isShareGoogleUrl(value) {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === "share.google" || host === "www.share.google" || host === "search.app" || host === "www.search.app";
+  } catch { return false; }
+}
+
+function isBlockedIp(address) {
+  const family = net.isIP(address);
+  if (family === 4) {
+    const [a,b] = address.split(".").map(Number);
+    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a >= 224);
+  }
+  if (family === 6) {
+    const ip = address.toLowerCase();
+    return ip === "::1" || ip === "::" || ip.startsWith("fc") || ip.startsWith("fd") || ip.startsWith("fe80:") || ip.startsWith("ff");
+  }
+  return true;
+}
+
+async function assertPublicHttpUrl(value) {
+  if (!validHttpUrl(value)) throw new Error("Only http/https URLs are supported.");
+  const u = new URL(value);
+  if (u.username || u.password) throw new Error("Credential-bearing URLs are not supported.");
+  if (net.isIP(u.hostname)) {
+    if (isBlockedIp(u.hostname)) throw new Error("Private or local network URLs are not allowed.");
+    return true;
+  }
+  const records = await dns.lookup(u.hostname, { all: true, verbatim: true });
+  if (!records.length || records.some(r => isBlockedIp(r.address))) throw new Error("The destination is not a public internet host.");
+  return true;
+}
+
+async function resolveGoogleShortLink(value) {
+  if (!isShareGoogleUrl(value)) return value;
+  let current = value;
+  for (let i = 0; i < 7; i++) {
+    await assertPublicHttpUrl(current);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    try {
+      const r = await fetch(current, {
+        method: "GET",
+        redirect: "manual",
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/json,image/avif,image/webp,image/*,video/*,*/*;q=0.8"
+        }
+      });
+      const location = r.headers.get("location");
+      if (location) {
+        current = new URL(location, current).toString();
+        continue;
+      }
+      return r.url || current;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error("The Google shared link redirected too many times.");
+}
+
+async function resolveInputUrl(value) {
+  return isShareGoogleUrl(value) ? await resolveGoogleShortLink(value) : value;
+}
+
+function mediaExtensionFromType(type) {
+  const t = String(type || "").split(";")[0].toLowerCase();
+  const map = { "image/jpeg":".jpg", "image/png":".png", "image/webp":".webp", "image/gif":".gif", "image/avif":".avif", "video/mp4":".mp4", "video/webm":".webm", "video/quicktime":".mov", "video/x-matroska":".mkv", "audio/mpeg":".mp3", "audio/mp4":".m4a", "audio/webm":".webm", "audio/ogg":".ogg" };
+  return map[t] || "";
+}
+
+async function inspectDirectMediaUrl(url) {
+  await assertPublicHttpUrl(url);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  try {
+    let r = await fetch(url, { method: "HEAD", redirect: "follow", signal: controller.signal, headers: { "User-Agent": "Mozilla/5.0" } }).catch(() => null);
+    if (!r || !r.ok || !r.headers.get("content-type")) {
+      r = await fetch(url, { method: "GET", redirect: "follow", signal: controller.signal, headers: { "User-Agent": "Mozilla/5.0", "Range": "bytes=0-0" } });
+    }
+    const type = (r.headers.get("content-type") || "").split(";")[0].toLowerCase();
+    const finalUrl = r.url || url;
+    try { await r.body?.cancel(); } catch (_) {}
+    if (/^(image|video|audio)\//.test(type)) {
+      return { isMedia: true, url: finalUrl, contentType: type, extension: mediaExtensionFromType(type), size: Number(r.headers.get("content-length")) || null };
+    }
+    return { isMedia: false, url: finalUrl, contentType: type };
+  } finally { clearTimeout(timer); }
+}
+
+async function extractOgMedia(url) {
+  await assertPublicHttpUrl(url);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const r = await fetch(url, { signal: controller.signal, redirect: "follow", headers: { "User-Agent": "Mozilla/5.0", "Accept": "text/html,application/xhtml+xml,*/*;q=0.8" } });
+    if (!r.ok) return { image: null, video: null, title: "", finalUrl: r.url || url };
+    const html = (await r.text()).slice(0, 1800000);
+    const decode = (v) => decodeHtml(String(v || "").replace(/\\+/g, "\\"));
+    const attrs = (tag) => {
+      const out = {};
+      const re = /([:\w-]+)\\s*=\\s*(["'])(.*?)\\2/gis;
+      let m;
+      while ((m = re.exec(tag))) out[m[1].toLowerCase()] = decode(m[3]);
+      return out;
+    };
+    const meta = (wanted) => {
+      const re = /<meta\b[^>]*>/gis;
+      let m;
+      while ((m = re.exec(html))) {
+        const a = attrs(m[0]);
+        if ((a.property || a.name || a.itemprop || "").toLowerCase() === wanted.toLowerCase()) return a.content || "";
+      }
+      return null;
+    };
+    const firstTagAttr = (tagName, attrNames) => {
+      const re = new RegExp(`<${tagName}\b[^>]*>`, "gis");
+      let m;
+      while ((m = re.exec(html))) {
+        const a = attrs(m[0]);
+        for (const name of attrNames) if (a[name]) return a[name];
+      }
+      return null;
+    };
+    const absolutize = (value) => {
+      if (!value) return null;
+      try { return new URL(value, r.url || url).toString(); } catch { return null; }
+    };
+    const image = absolutize(
+      meta("og:image") || meta("og:image:url") || meta("twitter:image") || meta("twitter:image:src") ||
+      meta("image") || meta("thumbnailUrl") || firstTagAttr("img", ["src", "data-src", "data-original", "data-lazy-src"])
+    );
+    const video = absolutize(
+      meta("og:video") || meta("og:video:url") || meta("og:video:secure_url") || meta("twitter:player:stream") ||
+      meta("contentUrl") || firstTagAttr("source", ["src"]) || firstTagAttr("video", ["src", "data-src"])
+    );
+    const title = meta("og:title") || meta("twitter:title") || meta("title") ||
+      ((html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || "").trim();
+    return { image, video, title: decodeHtml(title), finalUrl: r.url || url };
+  } finally { clearTimeout(timer); }
+}
+async function downloadDirectMedia(url, res, title = "instant-download") {
+  await assertPublicHttpUrl(url);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120000);
+  try {
+    const r = await fetch(url, { redirect: "follow", signal: controller.signal, headers: { "User-Agent": "Mozilla/5.0", "Accept": "image/avif,image/webp,image/*,video/*,audio/*,*/*;q=0.8" } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const type = (r.headers.get("content-type") || "application/octet-stream").split(";")[0].toLowerCase();
+    if (!/^(image|video|audio)\//.test(type)) throw new Error("The resolved link is not a direct media file.");
+    const ext = mediaExtensionFromType(type) || path.extname(new URL(r.url || url).pathname) || ".bin";
+    const buffer = Buffer.from(await r.arrayBuffer());
+    if (!buffer.length) throw new Error("The media response was empty.");
+    res.setHeader("Content-Type", type);
+    res.setHeader("Content-Length", buffer.length);
+    setAttachmentFilename(res, title, ext);
+    res.end(buffer);
+  } finally { clearTimeout(timer); }
 }
 
 function isYouTubeUrl(value) {
@@ -50,116 +215,6 @@ function isPinterestUrl(value) {
 function isImagePostUrl(value) {
   return isInstagramUrl(value) || isPinterestUrl(value);
 }
-function isGoogleDriveUrl(value) {
-  try {
-    const u = new URL(value);
-    const host = u.hostname.toLowerCase();
-    return host === "drive.google.com" || host === "docs.google.com" || host === "drive.usercontent.google.com";
-  } catch { return false; }
-}
-
-function extractGoogleDriveFileId(value) {
-  try {
-    const u = new URL(value);
-    const host = u.hostname.toLowerCase();
-    if (!/drive\.google\.com|docs\.google\.com|drive\.usercontent\.google\.com/.test(host)) return null;
-    const qid = u.searchParams.get('id');
-    if (qid && /^[A-Za-z0-9_-]{10,}$/.test(qid)) return qid;
-    const m = u.pathname.match(/\/file\/d\/([A-Za-z0-9_-]+)/i) || u.pathname.match(/\/document\/d\/([A-Za-z0-9_-]+)/i);
-    return m ? m[1] : null;
-  } catch { return null; }
-}
-
-function googleDriveDownloadUrl(fileId) {
-  return `https://drive.usercontent.google.com/download?id=${encodeURIComponent(fileId)}&export=download&confirm=t`;
-}
-
-async function fetchGoogleDriveResponse(fileId, originalUrl) {
-  const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36',
-    'Accept': '*/*'
-  };
-  let r = await fetch(googleDriveDownloadUrl(fileId), { headers, redirect: 'follow' });
-  const ct = String(r.headers.get('content-type') || '').toLowerCase();
-  if (r.ok && !ct.includes('text/html')) return r;
-
-  // Large public Drive files can return an HTML confirmation page. Extract the
-  // confirmation link/token and retry it rather than handing HTML to the user.
-  if (ct.includes('text/html')) {
-    const html = await r.text();
-    const patterns = [
-      /href="([^"]*confirm=[^"]+)"/i,
-      /href='([^']*confirm=[^']+)'/i,
-      /action="([^"]+)"/i
-    ];
-    for (const re of patterns) {
-      const m = html.match(re);
-      if (!m) continue;
-      let next = decodeHtml(m[1]).replace(/\\u003d/g, '=').replace(/&amp;/g, '&');
-      if (next.startsWith('/')) next = `https://drive.google.com${next}`;
-      if (!/^https?:\/\//i.test(next)) continue;
-      const rr = await fetch(next, { headers, redirect: 'follow' });
-      const rct = String(rr.headers.get('content-type') || '').toLowerCase();
-      if (rr.ok && !rct.includes('text/html')) return rr;
-    }
-  }
-  return r;
-}
-
-async function analyzeGoogleDrive(url) {
-  const fileId = extractGoogleDriveFileId(url);
-  if (!fileId) return null;
-  const r = await fetchGoogleDriveResponse(fileId, url);
-  const ct = String(r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-  const cd = r.headers.get('content-disposition') || '';
-  const len = Number(r.headers.get('content-length') || 0);
-  const isMedia = ct.startsWith('image/') || ct.startsWith('video/');
-  if (!r.ok || !isMedia) {
-    try { await r.body?.cancel(); } catch (_) {}
-    return null;
-  }
-  try { await r.body?.cancel(); } catch (_) {}
-  const filenameMatch = cd.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
-  let filename = filenameMatch ? decodeURIComponent(filenameMatch[1] || filenameMatch[2]) : '';
-  if (!filename) filename = `google-drive-${fileId}`;
-  return { fileId, contentType: ct, size: len, filename, mediaType: ct.startsWith('video/') ? 'video' : 'image' };
-}
-
-async function downloadGoogleDrive(url, res, fallbackName) {
-  const fileId = extractGoogleDriveFileId(url);
-  if (!fileId) throw new Error('Invalid Google Drive file link.');
-  const r = await fetchGoogleDriveResponse(fileId, url);
-  const ct = String(r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-  if (!r.ok || !(ct.startsWith('image/') || ct.startsWith('video/'))) {
-    try { await r.body?.cancel(); } catch (_) {}
-    throw new Error('Google Drive did not provide a downloadable image or video. Make sure the file is shared and downloads are allowed.');
-  }
-  const cd = r.headers.get('content-disposition') || '';
-  const match = cd.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
-  let filename = match ? decodeURIComponent(match[1] || match[2]) : '';
-  if (!filename) {
-    const ext = ct.split('/')[1] || 'bin';
-    filename = `${String(fallbackName || 'google-drive-file').replace(/[^a-zA-Z0-9._-]+/g, '_')}.${ext}`;
-  }
-  setAttachmentFilename(res, filename);
-  res.setHeader('Content-Type', ct);
-  const len = r.headers.get('content-length');
-  if (len) res.setHeader('Content-Length', len);
-  if (!r.body) throw new Error('Google Drive returned an empty file.');
-  const reader = r.body.getReader();
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (!res.write(Buffer.from(value))) await new Promise(resolve => res.once('drain', resolve));
-    }
-    res.end();
-  } catch (e) {
-    try { await reader.cancel(); } catch (_) {}
-    throw e;
-  }
-}
-
 
 function decodeHtml(value) {
   return String(value || "")
@@ -858,28 +913,35 @@ app.post("/api/analyze", async (req, res) => {
   if (!validHttpUrl(url)) return res.status(400).json({ error: "Enter a valid http/https URL." });
 
   try {
-    // Google Drive public/shared image and video links are handled directly.
-    // This avoids sending Drive's HTML viewer page through yt-dlp and preserves
-    // the original uploaded file when the link grants download access.
-    if (isGoogleDriveUrl(url)) {
-      const drive = await analyzeGoogleDrive(url);
-      if (!drive) {
-        return res.status(400).json({
-          error: "Could not access this Google Drive file. Make sure the file is shared with link access and downloading is allowed."
-        });
-      }
-      const label = drive.mediaType === 'video' ? 'Original video' : 'Original image';
+    const sourceUrl = await resolveInputUrl(url);
+    if (!validHttpUrl(sourceUrl)) throw new Error("The shared link did not resolve to a valid web URL.");
+
+    const direct = await inspectDirectMediaUrl(sourceUrl).catch(() => ({ isMedia: false }));
+    if (direct.isMedia) {
+      const typeLabel = direct.contentType.startsWith("image/") ? "Image" : direct.contentType.startsWith("video/") ? "Video" : "Audio";
       return res.json({
-        title: drive.filename || 'Google Drive file',
-        thumbnail: null,
-        duration: null,
-        uploader: 'Google Drive',
-        webpage_url: url,
-        extractor: 'Google Drive',
-        media_type: drive.mediaType,
-        qualities: [{ label, format_id: 'google-drive-original', has_audio: false, has_video: drive.mediaType === 'video' }],
+        title: "Google shared media", thumbnail: direct.contentType.startsWith("image/") ? sourceUrl : null,
+        duration: null, uploader: null, webpage_url: sourceUrl, resolved_url: sourceUrl,
+        original_url: url, extractor: isShareGoogleUrl(url) ? "Google Shared Link" : "Direct file", media_type: typeLabel.toLowerCase(),
+        qualities: [{ label: `Download ${typeLabel}`, format_id: "direct", has_audio: direct.contentType.startsWith("audio/") || direct.contentType.startsWith("video/"), has_video: direct.contentType.startsWith("video/") }],
         formats: []
       });
+    }
+
+    const og = await extractOgMedia(sourceUrl).catch(() => ({ image: null, video: null, title: "", finalUrl: sourceUrl }));
+    const ogCandidate = og.video || og.image;
+    if (ogCandidate && validHttpUrl(ogCandidate)) {
+      const ogMedia = await inspectDirectMediaUrl(ogCandidate).catch(() => ({ isMedia: false }));
+      if (ogMedia.isMedia) {
+        const typeLabel = ogMedia.contentType.startsWith("image/") ? "Image" : ogMedia.contentType.startsWith("video/") ? "Video" : "Audio";
+        return res.json({
+          title: og.title || "Shared media", thumbnail: typeLabel === "Image" ? ogCandidate : null, duration: null,
+          uploader: null, webpage_url: sourceUrl, resolved_url: ogCandidate, original_url: url,
+          extractor: isShareGoogleUrl(url) ? "Google Shared Link" : "Direct page", media_type: typeLabel.toLowerCase(),
+          image_urls: typeLabel === "Image" ? [ogCandidate] : [],
+          qualities: [{ label: `Download ${typeLabel}`, format_id: "direct", has_audio: typeLabel === "Audio" || typeLabel === "Video", has_video: typeLabel === "Video" }], formats: []
+        });
+      }
     }
 
     const analyzeArgs = [
@@ -890,19 +952,19 @@ app.post("/api/analyze", async (req, res) => {
       "--socket-timeout", "20",
       "--js-runtimes", "deno",
       "--remote-components", "ejs:github",
-      ...youtubeClientArgs(url),
-      url
+      ...youtubeClientArgs(sourceUrl),
+      sourceUrl
     ];
 
     let raw;
-    if (isYouTubeUrl(url)) {
+    if (isYouTubeUrl(sourceUrl)) {
       // Fast path: embedded client does not require a PO token and is much
       // quicker. If the video is not embeddable, fall back to the PO-token path.
       try {
         raw = await runYtDlp([
           "--dump-single-json", "--no-playlist", "--no-warnings", "--skip-download",
           "--socket-timeout", "12", "--js-runtimes", "deno", "--remote-components", "ejs:github",
-          ...youtubeClientArgs(url, true), url
+          ...youtubeClientArgs(sourceUrl, true), sourceUrl
         ]);
       } catch (_) {
         raw = await runYtDlp(analyzeArgs);
@@ -913,13 +975,13 @@ app.post("/api/analyze", async (req, res) => {
       } catch (firstError) {
         // Image-only Instagram/Pinterest posts can be exposed as image metadata
         // rather than video formats. We handle those with a public OpenGraph image fallback below.
-        if (!isImagePostUrl(url)) throw firstError;
+        if (!isImagePostUrl(sourceUrl)) throw firstError;
         raw = null;
       }
     }
     const info = raw ? JSON.parse(raw) : { title: "Image post", thumbnail: null, formats: [] };
 
-    if (isImagePostUrl(url)) {
+    if (isImagePostUrl(sourceUrl)) {
       let imageUrls = [];
       if (raw) {
         const candidates = [
@@ -937,8 +999,8 @@ app.post("/api/analyze", async (req, res) => {
       // shortcode GraphQL media response first. yt-dlp currently treats
       // image-only carousels as video entries and can return no formats.
       let igGraph = { imageUrls: [], title: '', uploader: '', mediaType: '' };
-      if (isInstagramUrl(url)) {
-        igGraph = await extractInstagramGraphqlMedia(url);
+      if (isInstagramUrl(sourceUrl)) {
+        igGraph = await extractInstagramGraphqlMedia(sourceUrl);
         if (igGraph.imageUrls.length) {
           imageUrls = igGraph.imageUrls;
         }
@@ -948,11 +1010,11 @@ app.post("/api/analyze", async (req, res) => {
       // response did not produce any images. This prevents a cover/thumbnail
       // extractor from truncating a real 5/8/10-image carousel to 3 images.
       if (!imageUrls.length) {
-        const graphOembedImages = isInstagramUrl(url) ? await extractInstagramGraphOembed(url).catch(() => []) : [];
-        const embedImages = isInstagramUrl(url) ? await extractInstagramEmbedImages(url).catch(() => []) : [];
-        const pageImages = await extractPublicImageUrls(url).catch(() => []);
-        const browserImages = isInstagramUrl(url) ? await extractInstagramBrowserImages(url).catch(() => []) : [];
-        const legacyOembedImages = await extractInstagramOembedImage(url);
+        const graphOembedImages = isInstagramUrl(url) ? await extractInstagramGraphOembed(sourceUrl).catch(() => []) : [];
+        const embedImages = isInstagramUrl(url) ? await extractInstagramEmbedImages(sourceUrl).catch(() => []) : [];
+        const pageImages = await extractPublicImageUrls(sourceUrl).catch(() => []);
+        const browserImages = isInstagramUrl(url) ? await extractInstagramBrowserImages(sourceUrl).catch(() => []) : [];
+        const legacyOembedImages = await extractInstagramOembedImage(sourceUrl);
         imageUrls = [...new Set([
           ...browserImages, ...embedImages, ...pageImages, ...imageUrls,
           ...graphOembedImages, ...legacyOembedImages
@@ -962,8 +1024,8 @@ app.post("/api/analyze", async (req, res) => {
       if (!hasVideo && imageUrls.length) {
         return res.json({
           title: igGraph.title || info.title || "Image post", thumbnail: imageUrls[0], duration: null,
-          uploader: igGraph.uploader || info.uploader || info.channel || null, webpage_url: info.webpage_url || url,
-          extractor: info.extractor_key || info.extractor || (isInstagramUrl(url) ? "Instagram" : "Pinterest"),
+          uploader: igGraph.uploader || info.uploader || info.channel || null, webpage_url: info.webpage_url || sourceUrl,
+          extractor: info.extractor_key || info.extractor || (isInstagramUrl(sourceUrl) ? "Instagram" : "Pinterest"),
           media_type: "image", image_urls: imageUrls,
           qualities: [{ label: imageUrls.length > 1 ? `Download ${imageUrls.length} images` : "Download image", format_id: "image", has_audio: false, has_video: false }],
           formats: []
@@ -1013,7 +1075,7 @@ app.post("/api/analyze", async (req, res) => {
       thumbnail: info.thumbnail || null,
       duration: info.duration || null,
       uploader: info.uploader || info.channel || null,
-      webpage_url: info.webpage_url || url,
+      webpage_url: info.webpage_url || sourceUrl,
       extractor: info.extractor_key || info.extractor || "unknown",
       qualities: qualities.slice(0, 20),
       formats: formats.slice(0, 100)
@@ -1035,14 +1097,18 @@ app.post("/api/download", async (req, res) => {
   }
 
   try {
-    if (isGoogleDriveUrl(url) || req.body.mediaType === 'google-drive') {
-      await downloadGoogleDrive(url, res, String(req.body.title || 'google-drive-file'));
+    const sourceUrl = await resolveInputUrl(url);
+
+    if (String(formatId || "") === "direct") {
+      const directUrl = validHttpUrl(req.body.resolvedUrl) ? req.body.resolvedUrl : sourceUrl;
+      await downloadDirectMedia(directUrl, res, String(req.body.title || "instant-download"));
       return;
     }
+
     if (req.body.mediaType === "image") {
       const imageUrls = Array.isArray(req.body.imageUrls) ? req.body.imageUrls : [];
       if (!imageUrls.length) return res.status(400).json({ error: "No image was found for this post." });
-      await runImageDownload(imageUrls, res, String(req.body.title || "instant-image"), url);
+      await runImageDownload(imageUrls, res, String(req.body.title || "instant-image"), sourceUrl);
       return;
     }
     let format;
@@ -1052,7 +1118,7 @@ app.post("/api/download", async (req, res) => {
       const h = Number(String(quality).replace("p", ""));
       // Explicitly request video + the best audio stream exposed by THIS
       // Instagram post, with a combined A/V fallback at the same height.
-      format = isYouTubeUrl(url)
+      format = isYouTubeUrl(sourceUrl)
         ? `bestvideo*[height<=${h}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${h}][ext=mp4]/best[height<=${h}]`
         : `bestvideo*[height<=${h}]+?bestaudio/best[height<=${h}]/best`;
     } else if (formatId) {
@@ -1063,13 +1129,13 @@ app.post("/api/download", async (req, res) => {
         ? String(formatId)
         : `${String(formatId || "bestvideo*")}+?bestaudio/best`;
     } else {
-      format = isYouTubeUrl(url)
+      format = isYouTubeUrl(sourceUrl)
         ? "bestvideo*[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
         : "bestvideo*+?bestaudio/best";
     }
 
     const title = String(req.body.title || "instant-download");
-    await runDownload(url, format, res, title, Boolean(audioOnly));
+    await runDownload(sourceUrl, format, res, title, Boolean(audioOnly));
   } catch (e) {
     if (!res.headersSent) res.status(500).json({ error: "Download failed." });
   }

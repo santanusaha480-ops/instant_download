@@ -35,14 +35,14 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:25px}
 <section class="hero">
 <div class="badge">Fast • Simple • No account</div>
 <h1>Download your <span>authorized</span> media.</h1>
-<p>Paste a supported media link, analyze it, choose an available quality, and save it.</p>
+<p>Paste a supported media link, Google shared link, or direct public media URL, analyze it, choose an available quality, and save it.</p>
 <div class="box">
 <div class="controls">
 <input id="url" type="url" placeholder="Paste your media link here…" autocomplete="off">
-<select id="source"><option value="auto">Auto detect</option><option>YouTube</option><option>Instagram</option><option>Pinterest</option><option>Google Drive</option><option>Direct file</option></select>
+<select id="source"><option value="auto">Auto detect</option><option>YouTube</option><option>Instagram</option><option>Pinterest</option><option>Google Shared Link</option><option>Direct file</option></select>
 <button class="primary" id="analyze">Analyze</button>
 </div>
-<div class="note">Only download content you own or have permission to save. Platform restrictions and copyright rules still apply.</div>
+<div class="note">Google shared links are resolved to their public destination first. Only download content you own or have permission to save. Platform restrictions and copyright rules still apply.</div>
 </div>
 <div class="panel" id="panel">
 <div class="loading" id="loading"><div class="spinner"></div>Checking the link…</div>
@@ -85,6 +85,7 @@ analyze.onclick=async()=>{
    document.getElementById('title').textContent=data.title||'Media ready';
    document.getElementById('details').textContent=
      [data.uploader,data.extractor,data.duration?`${Math.round(data.duration)} sec`:null].filter(Boolean).join(' • ') || 'Available formats found.';
+   if(data.original_url && data.resolved_url && data.original_url!==data.resolved_url){ setStatus('Google shared link resolved successfully.'); }
    const q=document.querySelector('.quality');
    q.innerHTML='';
    (data.qualities||[]).forEach(item=>{
@@ -107,13 +108,13 @@ async function download(formatId,label,hasAudio,audioOnly=false){
  const url=document.getElementById('url').value.trim();
  setStatus(`Preparing ${label}…`);
  try{
-   const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,formatId,quality:label,hasAudio,audioOnly,title:mediaInfo?.title||'instant-download',mediaType:mediaInfo?.media_type==='image'?'image':(mediaInfo?.extractor==='Google Drive'?'google-drive':mediaInfo?.media_type),imageUrls:mediaInfo?.image_urls||[]})});
+   const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,formatId,quality:label,hasAudio,audioOnly,title:mediaInfo?.title||'instant-download',mediaType:mediaInfo?.media_type,imageUrls:mediaInfo?.image_urls||[],resolvedUrl:mediaInfo?.resolved_url||mediaInfo?.webpage_url||url})});
    if(!r.ok){const e=await r.json().catch(()=>({})); throw new Error(e.error||'Download failed.');}
    const blob=await r.blob();
    const a=document.createElement('a');
    a.href=URL.createObjectURL(blob);
    const imageDownload=mediaInfo?.media_type==='image';
-   const ext=blob.type==='application/zip'?'.zip':(blob.type==='image/png'?'.png':blob.type==='image/webp'?'.webp':blob.type==='image/gif'?'.gif':blob.type==='image/jpeg'?'.jpg':blob.type==='video/webm'?'.webm':imageDownload?'.jpg':'.mp4');
+   const ext=blob.type==='application/zip'?'.zip':(blob.type==='image/png'?'.png':blob.type==='image/webp'?'.webp':blob.type==='image/gif'?'.gif':imageDownload?'.jpg':'.mp4');
    a.download=(mediaInfo?.title||'instant-download').replace(/[\\/:*?"<>|]/g,'_')+ext;
    document.body.appendChild(a);a.click();a.remove();
    URL.revokeObjectURL(a.href);
