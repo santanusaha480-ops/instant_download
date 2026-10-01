@@ -23,6 +23,26 @@ function validHttpUrl(value) {
   }
 }
 
+function isYouTubeUrl(value) {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === "youtube.com" || host.endsWith(".youtube.com") || host === "youtu.be";
+  } catch {
+    return false;
+  }
+}
+
+// YouTube has recently changed which player clients require bot/PO-token
+// checks. yt-dlp documents web_embedded as a supported client for videos that
+// are embeddable. We use it as a fallback; this does not authenticate or
+// bypass private/member-only content.
+function youtubeClientArgs(url, embeddedOnly = false) {
+  if (!isYouTubeUrl(url)) return [];
+  return ["--extractor-args", embeddedOnly
+    ? "youtube:player_client=web_embedded"
+    : "youtube:player_client=default,web_embedded,-android_vr"];
+}
+
 function runYtDlp(args) {
   return new Promise((resolve, reject) => {
     const p = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -48,6 +68,7 @@ async function runDownload(url, format, res, filenameFallback) {
     "--fragment-retries", "3",
     "--js-runtimes", "deno",
     "--remote-components", "ejs:github",
+    ...youtubeClientArgs(url),
     "-o", outputTemplate,
   ];
 
@@ -145,7 +166,7 @@ app.post("/api/analyze", async (req, res) => {
   if (!validHttpUrl(url)) return res.status(400).json({ error: "Enter a valid http/https URL." });
 
   try {
-    const raw = await runYtDlp([
+    const analyzeArgs = [
       "--dump-single-json",
       "--no-playlist",
       "--no-warnings",
@@ -153,8 +174,34 @@ app.post("/api/analyze", async (req, res) => {
       "--socket-timeout", "20",
       "--js-runtimes", "deno",
       "--remote-components", "ejs:github",
+      ...youtubeClientArgs(url),
       url
-    ]);
+    ];
+
+    let raw;
+    try {
+      raw = await runYtDlp(analyzeArgs);
+    } catch (firstError) {
+      // If YouTube rejects the normal client with a bot-check, retry only
+      // with its supported embedded client. This works only for videos that
+      // YouTube makes embeddable; private/member-only content remains blocked.
+      const msg = String(firstError.message || firstError);
+      if (isYouTubeUrl(url) && /sign in to confirm|not a bot|bot|captcha|confirm you/i.test(msg)) {
+        raw = await runYtDlp([
+          "--dump-single-json",
+          "--no-playlist",
+          "--no-warnings",
+          "--skip-download",
+          "--socket-timeout", "20",
+          "--js-runtimes", "deno",
+          "--remote-components", "ejs:github",
+          ...youtubeClientArgs(url, true),
+          url
+        ]);
+      } else {
+        throw firstError;
+      }
+    }
     const info = JSON.parse(raw);
 
     if (info.duration && Number(info.duration) > MAX_SECONDS) {
