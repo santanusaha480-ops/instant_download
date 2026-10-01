@@ -9,6 +9,7 @@ const { URL } = require("url");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const MAX_SECONDS = Number(process.env.MAX_MEDIA_SECONDS || 900);
+const MAX_CAROUSEL_ITEMS = Number(process.env.MAX_CAROUSEL_ITEMS || 50);
 
 app.use(cors());
 app.use(express.json({ limit: "32kb" }));
@@ -203,6 +204,57 @@ async function extractInstagramEmbedImages(url) {
   return [];
 }
 
+async function extractInstagramBrowserImages(url) {
+  if (!isInstagramUrl(url)) return [];
+  return await new Promise((resolve) => {
+    const args = [
+      "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+      "--disable-extensions", "--disable-background-networking", "--no-first-run",
+      "--no-default-browser-check", "--disable-blink-features=AutomationControlled",
+      "--virtual-time-budget=12000", "--dump-dom", url
+    ];
+    const p = spawn(process.env.YTDLP_CHROME_PATH || "/usr/bin/chromium", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let html = "", settled = false;
+    const finish = (value) => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } };
+    const timer = setTimeout(() => { try { p.kill("SIGKILL"); } catch (_) {} finish([]); }, 22000);
+    p.stdout.on("data", d => {
+      html += d.toString();
+      if (html.length > 12000000) html = html.slice(-12000000);
+    });
+    p.on("error", () => finish([]));
+    p.on("close", () => {
+      const out = [];
+      const add = (value) => {
+        if (!value) return;
+        let x = String(value).replace(/\\\//g, "/").replace(/\\u0026/gi, "&").replace(/\\u003d/gi, "=").replace(/\\u0025/gi, "%");
+        x = decodeHtml(x);
+        try { x = JSON.parse('"' + x.replace(/"/g, '\\"') + '"'); } catch (_) {}
+        try { x = new URL(x, url).toString(); } catch (_) { return; }
+        if (/^https?:\/\//i.test(x) && /(?:cdninstagram|fbcdn|scontent)/i.test(x) && !out.includes(x)) out.push(x);
+      };
+      const patterns = [
+        /"display_url"\s*:\s*"((?:\\.|[^"\\])+)"/g,
+        /"image_versions2"\s*:\s*\{[\s\S]{0,5000}?"url"\s*:\s*"((?:\\.|[^"\\])+)"/g,
+        /"thumbnail_src"\s*:\s*"((?:\\.|[^"\\])+)"/g,
+        /<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image)["'][^>]+content=["']([^"']+)["'][^>]*>/gi,
+        /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:image|twitter:image)["'][^>]*>/gi,
+        /<img[^>]+(?:src|data-src)=["']([^"']+)["'][^>]*>/gi,
+        /<img[^>]+srcset=["']([^"']+)["'][^>]*>/gi
+      ];
+      for (const re of patterns) {
+        let m;
+        while ((m = re.exec(html)) && out.length < MAX_CAROUSEL_ITEMS) {
+          if (re.source.includes("srcset")) {
+            for (const part of String(m[1]).split(",")) add(part.trim().split(/\s+/)[0]);
+          } else add(m[1]);
+        }
+        if (out.length >= MAX_CAROUSEL_ITEMS) break;
+      }
+      finish([...new Set(out)]);
+    });
+  });
+}
+
 async function extractPublicImageUrls(url) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
@@ -267,7 +319,7 @@ async function extractPublicImageUrls(url) {
         }
       } catch (_) {}
     }
-    return images.slice(0, 12);
+    return images.slice(0, MAX_CAROUSEL_ITEMS);
   } finally {
     clearTimeout(timer);
   }
@@ -313,7 +365,7 @@ function imageFetchCandidates(value) {
 }
 
 async function runImageDownload(imageUrls, res, filenameFallback, refererUrl = null) {
-  const urls = [...new Set((imageUrls || []).filter(validHttpUrl))].slice(0, 12);
+  const urls = [...new Set((imageUrls || []).filter(validHttpUrl))].slice(0, MAX_CAROUSEL_ITEMS);
   if (!urls.length) throw new Error("No public image was found in this post.");
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "instant-images-"));
   const safeName = String(filenameFallback || "instant-image")
@@ -544,14 +596,16 @@ app.post("/api/analyze", async (req, res) => {
       const graphOembedImages = isInstagramUrl(url) ? await extractInstagramGraphOembed(url).catch(() => []) : [];
       const embedImages = isInstagramUrl(url) ? await extractInstagramEmbedImages(url).catch(() => []) : [];
       const pageImages = await extractPublicImageUrls(url).catch(() => []);
+      const browserImages = isInstagramUrl(url) ? await extractInstagramBrowserImages(url).catch(() => []) : [];
       const legacyOembedImages = await extractInstagramOembedImage(url);
       imageUrls = [...new Set([
-        ...graphOembedImages,
+        ...browserImages,
         ...embedImages,
-        ...imageUrls,
         ...pageImages,
+        ...imageUrls,
+        ...graphOembedImages,
         ...legacyOembedImages
-      ].map(pinterestOriginalUrl))].slice(0, 12);
+      ].map(pinterestOriginalUrl))].slice(0, MAX_CAROUSEL_ITEMS);
       const hasVideo = (info.formats || []).some(f => f.url && f.vcodec && f.vcodec !== "none");
       if (!hasVideo && imageUrls.length) {
         return res.json({
@@ -609,8 +663,8 @@ app.post("/api/analyze", async (req, res) => {
       uploader: info.uploader || info.channel || null,
       webpage_url: info.webpage_url || url,
       extractor: info.extractor_key || info.extractor || "unknown",
-      qualities: qualities.slice(0, 12),
-      formats: formats.slice(0, 80)
+      qualities: qualities.slice(0, 20),
+      formats: formats.slice(0, 100)
     });
   } catch (e) {
     const detail = String(e.message || e).replace(/\s+/g, " ").slice(0, 500);

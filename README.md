@@ -11,3 +11,6 @@ This build keeps the working Pinterest fixes and improves Instagram image-post e
 
 ## Limits
 Only public/authorized media is supported. No private-account, members-only, DRM, credential, or cookie bypass is included.
+
+
+Instagram carousel handling: public image-only posts use a short headless Chromium fallback to let the public Instagram page finish loading carousel metadata. Up to 50 public carousel items are supported by default (`MAX_CAROUSEL_ITEMS`). No account credentials or cookies are used.
