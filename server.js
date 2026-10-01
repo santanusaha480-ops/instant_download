@@ -56,33 +56,97 @@ function decodeHtml(value) {
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">");
 }
 
-async function extractOpenGraphImages(url) {
+async function extractInstagramOembedImage(url) {
+  if (!isInstagramUrl(url)) return [];
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 12000);
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const endpoint = `https://www.instagram.com/oembed/?url=${encodeURIComponent(url)}`;
+    const r = await fetch(endpoint, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*"
+      }
+    });
+    if (!r.ok) return [];
+    const data = await r.json();
+    return data?.thumbnail_url ? [data.thumbnail_url] : [];
+  } catch (_) {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function extractPublicImageUrls(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
   try {
     const r = await fetch(url, {
       signal: controller.signal,
+      redirect: "follow",
       headers: {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache"
       }
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const html = await r.text();
     const images = [];
-    const add = (u) => {
-      if (!u) return;
+    const add = (value) => {
+      if (!value) return;
+      let u = String(value);
+      // Instagram serializes URLs inside JSON with escaped slashes/unicode.
+      u = u.replace(/\\\\\//g, "/").replace(/\\u0026/gi, "&").replace(/\\u003d/gi, "=").replace(/\\u0025/gi, "%");
+      try { u = JSON.parse('"' + u.replace(/"/g, '\\"') + '"'); } catch (_) {}
+      u = decodeHtml(u);
       try {
-        const absolute = new URL(decodeHtml(u), url).toString();
-        if (/^https?:\/\//i.test(absolute) && !images.includes(absolute)) images.push(absolute);
+        const absolute = new URL(u, url).toString();
+        if (!/^https?:\/\//i.test(absolute)) return;
+        if (!/\.(?:jpg|jpeg|png|webp)(?:[?#]|$)/i.test(absolute) && !/cdninstagram|fbcdn|scontent/i.test(absolute)) return;
+        if (!images.includes(absolute)) images.push(absolute);
       } catch (_) {}
     };
+
+    // Standard metadata used by many public Instagram/Pinterest pages.
     const metaRe = /<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image)["'][^>]+content=["']([^"']+)["'][^>]*>/gi;
-    let m; while ((m = metaRe.exec(html)) && images.length < 12) add(m[1]);
+    let m;
+    while ((m = metaRe.exec(html)) && images.length < 20) add(m[1]);
     const reverseRe = /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:image|twitter:image)["'][^>]*>/gi;
-    while ((m = reverseRe.exec(html)) && images.length < 12) add(m[1]);
-    return images;
-  } finally { clearTimeout(timer); }
+    while ((m = reverseRe.exec(html)) && images.length < 20) add(m[1]);
+
+    // Instagram\'s public HTML/embedded JSON commonly contains these fields.
+    const patterns = [
+      /"display_url"\s*:\s*"((?:\\.|[^"\\])+)"/g,
+      /"thumbnail_src"\s*:\s*"((?:\\.|[^"\\])+)"/g,
+      new RegExp('"url"\\s*:\\s*"(https?:\\\\/(?:\\\\/)?(?:scontent|cdninstagram|fbcdn)[^"]+)"', 'g'),
+      new RegExp('https?:\\/\\/(?:scontent|cdninstagram|fbcdn)[^"\\\\\\s]+', 'g')
+    ];
+    for (const re of patterns) {
+      while ((m = re.exec(html)) && images.length < 20) add(m[1] || m[0]);
+    }
+
+    // JSON-LD can contain the main image for a single public post.
+    const ldRe = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+    while ((m = ldRe.exec(html)) && images.length < 20) {
+      try {
+        const obj = JSON.parse(m[1]);
+        const stack = Array.isArray(obj) ? obj : [obj];
+        for (const item of stack) {
+          const image = item && item.image;
+          if (typeof image === "string") add(image);
+          else if (Array.isArray(image)) image.forEach(add);
+          else if (image && typeof image.url === "string") add(image.url);
+        }
+      } catch (_) {}
+    }
+    return images.slice(0, 12);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // YouTube has recently changed which player clients require bot/PO-token
@@ -109,7 +173,7 @@ function runYtDlp(args) {
   });
 }
 
-async function runImageDownload(imageUrls, res, filenameFallback) {
+async function runImageDownload(imageUrls, res, filenameFallback, refererUrl = null) {
   const urls = [...new Set((imageUrls || []).filter(validHttpUrl))].slice(0, 12);
   if (!urls.length) throw new Error("No public image was found in this post.");
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "instant-images-"));
@@ -121,7 +185,7 @@ async function runImageDownload(imageUrls, res, filenameFallback) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 20000);
       try {
-        const r = await fetch(urls[i], { signal: controller.signal, headers: { "User-Agent": "Mozilla/5.0" } });
+        const r = await fetch(urls[i], { signal: controller.signal, headers: { "User-Agent": "Mozilla/5.0", ...(refererUrl ? { "Referer": refererUrl } : {}) } });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const type = (r.headers.get("content-type") || "image/jpeg").split(";")[0].toLowerCase();
         const ext = type === "image/png" ? "png" : type === "image/webp" ? "webp" : type === "image/gif" ? "gif" : "jpg";
@@ -310,8 +374,12 @@ app.post("/api/analyze", async (req, res) => {
       if (raw) {
         imageUrls = [info.thumbnail, ...(Array.isArray(info.entries) ? info.entries.flatMap(e => [e?.thumbnail]) : [])].filter(Boolean);
       }
-      if (!imageUrls.length) imageUrls = await extractOpenGraphImages(url);
-      imageUrls = [...new Set(imageUrls)].slice(0, 12);
+      // Always inspect the public page as a second source. This is important
+      // for Instagram photo posts/carousels because current yt-dlp can detect
+      // the post but return no video formats for image-only entries.
+      const pageImages = await extractPublicImageUrls(url).catch(() => []);
+      const oembedImages = await extractInstagramOembedImage(url);
+      imageUrls = [...new Set([...imageUrls, ...pageImages, ...oembedImages])].slice(0, 12);
       const hasVideo = (info.formats || []).some(f => f.url && f.vcodec && f.vcodec !== "none");
       if (!hasVideo && imageUrls.length) {
         return res.json({
@@ -392,7 +460,7 @@ app.post("/api/download", async (req, res) => {
     if (req.body.mediaType === "image") {
       const imageUrls = Array.isArray(req.body.imageUrls) ? req.body.imageUrls : [];
       if (!imageUrls.length) return res.status(400).json({ error: "No image was found for this post." });
-      await runImageDownload(imageUrls, res, String(req.body.title || "instant-image"));
+      await runImageDownload(imageUrls, res, String(req.body.title || "instant-image"), url);
       return;
     }
     let format;

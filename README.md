@@ -1,20 +1,20 @@
-# Instant Download — Railway
+# Instant Download — Railway v7
 
-Full-stack Node/Express + yt-dlp + FFmpeg media downloader for public/authorized content.
+Node/Express + yt-dlp + FFmpeg media downloader intended for public/authorized media.
 
-## YouTube
+## v7 fixes
+- Instagram Reels and video posts continue to use yt-dlp.
+- Instagram single-photo posts now use a public-page image fallback instead of requiring yt-dlp video formats.
+- Instagram image carousels are collected from public HTML metadata when available and returned as a ZIP.
+- Instagram oEmbed thumbnail is used as an additional fallback for public single-photo posts.
+- Image downloads send the original post as the HTTP Referer when fetching the CDN image.
+- Pinterest public image pins also use the same public-page image fallback.
+- YouTube keeps the fast `web_embedded` analysis path and PO-token fallback.
 
-The container installs Deno plus the current `yt-dlp` Python package and the official yt-dlp-recommended `yt-dlp-getpot-wpc` PO-token provider. The provider uses Chromium to mint YouTube WebPoClient tokens when yt-dlp requests them. This can improve compatibility with current YouTube bot/PO-token checks, but YouTube may still reject requests based on IP, video availability, account state, or other platform controls.
+## Important limitation
+Current yt-dlp versions can detect Instagram image-only posts but return no video formats for them. This is a known limitation, so the application has a separate public-image extraction path. It cannot access private/login-only/DRM content and does not accept user cookies or credentials.
 
-The app does not include or accept user account credentials/cookies. Private, members-only, DRM-protected, or otherwise restricted media is not promised to work.
-
-## Deploy
-
-Use Railway with the repository root `/` and Dockerfile builder. Push these files to GitHub and redeploy.
-
-
-## Image posts
-Instagram and Pinterest image posts now use a public OpenGraph image fallback when the video extractor exposes no video formats. Single images download directly; multiple public images are returned as a ZIP.
-
-## YouTube speed
-YouTube analysis tries the `web_embedded` client first because it does not require a PO token; it falls back to the PO-token path when needed. YouTube can still be slower when the fallback is required.
+## Railway
+- Root directory: `/`
+- Builder: Dockerfile
+- Public domain: generate one in Railway
