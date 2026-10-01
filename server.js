@@ -70,6 +70,123 @@ function setAttachmentFilename(res, filename, ext = "") {
   res.setHeader("Content-Disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`);
 }
 
+
+function extractCookie(setCookie, name) {
+  const m = String(setCookie || '').match(new RegExp('(?:^|,\\s*)' + name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&') + '=([^;]+)', 'i'));
+  return m ? m[1] : '';
+}
+
+function extractInstagramLsd(html) {
+  const patterns = [
+    /name=["']lsd["'][^>]+value=["']([^"']+)["']/i,
+    /["']LSD["']\s*:\s*["']([^"']+)["']/i,
+    /"lsd"\s*:\s*\{"token"\s*:\s*"([^"]+)"/i
+  ];
+  for (const re of patterns) {
+    const m = String(html || '').match(re);
+    if (m) return m[1];
+  }
+  return '';
+}
+
+function bestInstagramImageFromNode(node) {
+  const candidates = [];
+  const addCandidates = (arr) => {
+    for (const c of Array.isArray(arr) ? arr : []) {
+      if (!c?.url) continue;
+      candidates.push({ url: c.url, width: Number(c.width) || 0, height: Number(c.height) || 0 });
+    }
+  };
+  addCandidates(node?.image_versions2?.candidates);
+  addCandidates(node?.image_versions?.candidates);
+  addCandidates(node?.thumbnail_versions);
+  if (node?.display_url) candidates.push({ url: node.display_url, width: Number(node.original_width) || 0, height: Number(node.original_height) || 0 });
+  candidates.sort((a,b) => (b.width*b.height) - (a.width*a.height));
+  return candidates[0]?.url || null;
+}
+
+async function extractInstagramGraphqlMedia(url) {
+  if (!isInstagramUrl(url)) return { imageUrls: [], title: '', uploader: '', mediaType: '' };
+  const shortcode = instagramPostCode(url);
+  if (!shortcode) return { imageUrls: [], title: '', uploader: '', mediaType: '' };
+
+  const ua = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
+  const baseHeaders = {
+    'User-Agent': ua,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Cache-Control': 'no-cache'
+  };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const home = await fetch('https://www.instagram.com/', { signal: controller.signal, headers: baseHeaders });
+    const homeHtml = await home.text();
+    const setCookie = home.headers.get('set-cookie') || '';
+    const csrf = extractCookie(setCookie, 'csrftoken');
+    const lsd = extractInstagramLsd(homeHtml);
+    if (!csrf) return { imageUrls: [], title: '', uploader: '', mediaType: '' };
+
+    const variables = JSON.stringify({
+      shortcode,
+      '__relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider': false
+    });
+    const body = new URLSearchParams({
+      doc_id: process.env.INSTAGRAM_GRAPHQL_DOC_ID || '27128499623469141',
+      variables
+    });
+    const headers = {
+      ...baseHeaders,
+      'Accept': '*/*',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Origin': 'https://www.instagram.com',
+      'Referer': `https://www.instagram.com/p/${shortcode}/`,
+      'X-IG-App-ID': '936619743392459',
+      'X-CSRFToken': csrf,
+      'X-FB-Friendly-Name': 'PolarisPostRootQuery',
+      'X-FB-LSD': lsd,
+      'X-ASBD-ID': '359341'
+    };
+    const r = await fetch('https://www.instagram.com/graphql/query', { method: 'POST', signal: controller.signal, headers, body });
+    if (!r.ok) return { imageUrls: [], title: '', uploader: '', mediaType: '' };
+    const json = await r.json();
+    const webInfo = json?.data?.xdt_api__v1__media__shortcode__web_info;
+    const item = webInfo?.items?.[0];
+    if (!item) return { imageUrls: [], title: '', uploader: '', mediaType: '' };
+
+    const nodes = [];
+    if (item.media_type === 8 || Array.isArray(item.carousel_media)) nodes.push(...(item.carousel_media || []));
+    else nodes.push(item);
+
+    const imageUrls = [];
+    for (const node of nodes) {
+      // For an image carousel, use the highest-resolution image candidate for
+      // each individual slide. Do not use the post thumbnail as a substitute.
+      if (Number(node?.media_type) === 2 || node?.video_versions?.length) {
+        // Mixed carousels may contain videos; leave those to the video extractor
+        // rather than pretending the video cover is the original photo.
+        continue;
+      }
+      const image = bestInstagramImageFromNode(node);
+      if (image && !imageUrls.includes(image)) imageUrls.push(image);
+    }
+
+    const caption = item?.caption?.text || item?.caption?.body?.text || '';
+    const username = item?.user?.username || item?.owner?.username || '';
+    const title = caption ? caption.slice(0, 100) : (username ? `Instagram post by @${username}` : 'Instagram post');
+    return {
+      imageUrls: imageUrls.slice(0, MAX_CAROUSEL_ITEMS),
+      title,
+      uploader: username,
+      mediaType: imageUrls.length > 1 ? 'carousel' : 'image'
+    };
+  } catch (_) {
+    return { imageUrls: [], title: '', uploader: '', mediaType: '' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function extractInstagramOembedImage(url) {
   if (!isInstagramUrl(url)) return [];
   const controller = new AbortController();
@@ -371,11 +488,9 @@ async function runImageDownload(imageUrls, res, filenameFallback, refererUrl = n
   const safeName = String(filenameFallback || "instant-image")
     .replace(/[\\/:*?"<>|\r\n]/g, "_").slice(0, 120) || "instant-image";
   try {
-    const files = [];
-    for (let i = 0; i < urls.length; i++) {
-      let saved = false;
+    const fileResults = await Promise.all(urls.map(async (imageUrl, i) => {
       let lastError = null;
-      for (const candidate of imageFetchCandidates(urls[i])) {
+      for (const candidate of imageFetchCandidates(imageUrl)) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 20000);
         try {
@@ -388,15 +503,14 @@ async function runImageDownload(imageUrls, res, filenameFallback, refererUrl = n
           const buf = Buffer.from(await r.arrayBuffer());
           if (buf.length < 1000) throw new Error("Image response was too small");
           await fs.promises.writeFile(file, buf);
-          files.push(file);
-          saved = true;
-          break;
+          return file;
         } catch (e) {
           lastError = e;
         } finally { clearTimeout(timer); }
       }
-      if (!saved) throw new Error(`Could not download image ${i + 1}${lastError ? `: ${lastError.message}` : ""}`);
-    }
+      throw new Error(`Could not download image ${i + 1}${lastError ? `: ${lastError.message}` : ""}`);
+    }));
+    const files = fileResults;
     if (files.length === 1) {
       const ext = path.extname(files[0]).toLowerCase() || ".jpg";
       const stat = await fs.promises.stat(files[0]);
@@ -590,27 +704,36 @@ app.post("/api/analyze", async (req, res) => {
         candidates.sort((a, b) => b.score - a.score);
         imageUrls = candidates.map(x => x.url);
       }
-      // Always inspect the public page as a second source. This is important
-      // for Instagram photo posts/carousels because current yt-dlp can detect
-      // the post but return no video formats for image-only entries.
-      const graphOembedImages = isInstagramUrl(url) ? await extractInstagramGraphOembed(url).catch(() => []) : [];
-      const embedImages = isInstagramUrl(url) ? await extractInstagramEmbedImages(url).catch(() => []) : [];
-      const pageImages = await extractPublicImageUrls(url).catch(() => []);
-      const browserImages = isInstagramUrl(url) ? await extractInstagramBrowserImages(url).catch(() => []) : [];
-      const legacyOembedImages = await extractInstagramOembedImage(url);
-      imageUrls = [...new Set([
-        ...browserImages,
-        ...embedImages,
-        ...pageImages,
-        ...imageUrls,
-        ...graphOembedImages,
-        ...legacyOembedImages
-      ].map(pinterestOriginalUrl))].slice(0, MAX_CAROUSEL_ITEMS);
+      // Instagram image posts/carousels are handled by Instagram's current
+      // shortcode GraphQL media response first. yt-dlp currently treats
+      // image-only carousels as video entries and can return no formats.
+      let igGraph = { imageUrls: [], title: '', uploader: '', mediaType: '' };
+      if (isInstagramUrl(url)) {
+        igGraph = await extractInstagramGraphqlMedia(url);
+        if (igGraph.imageUrls.length) {
+          imageUrls = igGraph.imageUrls;
+        }
+      }
+
+      // Only use the slower HTML/browser fallbacks when the dedicated media
+      // response did not produce any images. This prevents a cover/thumbnail
+      // extractor from truncating a real 5/8/10-image carousel to 3 images.
+      if (!imageUrls.length) {
+        const graphOembedImages = isInstagramUrl(url) ? await extractInstagramGraphOembed(url).catch(() => []) : [];
+        const embedImages = isInstagramUrl(url) ? await extractInstagramEmbedImages(url).catch(() => []) : [];
+        const pageImages = await extractPublicImageUrls(url).catch(() => []);
+        const browserImages = isInstagramUrl(url) ? await extractInstagramBrowserImages(url).catch(() => []) : [];
+        const legacyOembedImages = await extractInstagramOembedImage(url);
+        imageUrls = [...new Set([
+          ...browserImages, ...embedImages, ...pageImages, ...imageUrls,
+          ...graphOembedImages, ...legacyOembedImages
+        ].map(pinterestOriginalUrl))].slice(0, MAX_CAROUSEL_ITEMS);
+      }
       const hasVideo = (info.formats || []).some(f => f.url && f.vcodec && f.vcodec !== "none");
       if (!hasVideo && imageUrls.length) {
         return res.json({
-          title: info.title || "Image post", thumbnail: imageUrls[0], duration: null,
-          uploader: info.uploader || info.channel || null, webpage_url: info.webpage_url || url,
+          title: igGraph.title || info.title || "Image post", thumbnail: imageUrls[0], duration: null,
+          uploader: igGraph.uploader || info.uploader || info.channel || null, webpage_url: info.webpage_url || url,
           extractor: info.extractor_key || info.extractor || (isInstagramUrl(url) ? "Instagram" : "Pinterest"),
           media_type: "image", image_urls: imageUrls,
           qualities: [{ label: imageUrls.length > 1 ? `Download ${imageUrls.length} images` : "Download image", format_id: "image", has_audio: false, has_video: false }],

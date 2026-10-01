@@ -14,3 +14,7 @@ Only public/authorized media is supported. No private-account, members-only, DRM
 
 
 Instagram carousel handling: public image-only posts use a short headless Chromium fallback to let the public Instagram page finish loading carousel metadata. Up to 50 public carousel items are supported by default (`MAX_CAROUSEL_ITEMS`). No account credentials or cookies are used.
+
+
+### Instagram image posts
+The server first queries Instagram's current public shortcode-media response (`xdt_api__v1__media__shortcode__web_info`) and selects the highest-resolution image candidate for every carousel item. The GraphQL document id can be overridden with `INSTAGRAM_GRAPHQL_DOC_ID` when Instagram rotates it. The service does not accept user account credentials or cookies.
