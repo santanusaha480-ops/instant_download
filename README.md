@@ -1,20 +1,17 @@
-# Instant Download — Railway v7
+# Instant Download — Railway-ready v8
 
-Node/Express + yt-dlp + FFmpeg media downloader intended for public/authorized media.
+Full-stack Node/Express + yt-dlp + FFmpeg media downloader for public/authorized media.
 
-## v7 fixes
-- Instagram Reels and video posts continue to use yt-dlp.
-- Instagram single-photo posts now use a public-page image fallback instead of requiring yt-dlp video formats.
-- Instagram image carousels are collected from public HTML metadata when available and returned as a ZIP.
-- Instagram oEmbed thumbnail is used as an additional fallback for public single-photo posts.
-- Image downloads send the original post as the HTTP Referer when fetching the CDN image.
-- Pinterest public image pins also use the same public-page image fallback.
-- YouTube keeps the fast `web_embedded` analysis path and PO-token fallback.
+## v8 fixes
+- Pinterest video downloads: fixes `Invalid character in header content [Content-Disposition]` when a pin title contains emoji or other Unicode characters. Downloads now use RFC 5987 UTF-8 filenames with an ASCII fallback.
+- Pinterest image quality: prefers Pinterest `originals` CDN URLs when available instead of 236x/474x/736x preview images, with automatic size fallbacks if the original URL is unavailable.
+- Pinterest image downloads validate the returned content type and retry alternate CDN sizes.
+- Existing Instagram photo/carousel and YouTube fixes remain.
 
-## Important limitation
-Current yt-dlp versions can detect Instagram image-only posts but return no video formats for them. This is a known limitation, so the application has a separate public-image extraction path. It cannot access private/login-only/DRM content and does not accept user cookies or credentials.
-
-## Railway
+## Deploy on Railway
 - Root directory: `/`
 - Builder: Dockerfile
-- Public domain: generate one in Railway
+- Push the repository and let Railway redeploy.
+
+## Scope
+Only public/authorized media is supported. Private, login-only, DRM-protected, paywalled, or authentication-bypassing downloads are not promised.

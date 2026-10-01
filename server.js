@@ -56,6 +56,19 @@ function decodeHtml(value) {
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">");
 }
 
+function setAttachmentFilename(res, filename, ext = "") {
+  const raw = String(filename || "instant-download").trim() || "instant-download";
+  const withExt = ext && !raw.toLowerCase().endsWith(ext.toLowerCase()) ? `${raw}${ext}` : raw;
+  const ascii = withExt
+    .normalize("NFKD")
+    .replace(/[^\x20-\x7E]/g, "_")
+    .replace(/[\\/:*?"<>|;\r\n]/g, "_")
+    .replace(/\s+/g, " ")
+    .slice(0, 150) || `instant-download${ext}`;
+  const encoded = encodeURIComponent(withExt).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  res.setHeader("Content-Disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`);
+}
+
 async function extractInstagramOembedImage(url) {
   if (!isInstagramUrl(url)) return [];
   const controller = new AbortController();
@@ -77,6 +90,21 @@ async function extractInstagramOembedImage(url) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function pinterestOriginalUrl(value) {
+  try {
+    const u = new URL(value);
+    if (!/pinimg\.com$/i.test(u.hostname)) return value;
+    u.pathname = u.pathname.replace(/\/(?:originals|1200x|736x|564x|474x|400x|236x|170x)\//i, "/originals/");
+    return u.toString();
+  } catch (_) { return value; }
+}
+
+function rankImageUrl(value, width = 0, height = 0) {
+  const u = pinterestOriginalUrl(value);
+  const w = Number(width) || 0, h = Number(height) || 0;
+  return { url: u, score: w * h + (/\/originals\//i.test(u) ? 1e12 : 0) };
 }
 
 async function extractPublicImageUrls(url) {
@@ -173,6 +201,21 @@ function runYtDlp(args) {
   });
 }
 
+function imageFetchCandidates(value) {
+  const base = pinterestOriginalUrl(value);
+  if (!isPinterestUrl(value) && !/pinimg\.com$/i.test(new URL(value).hostname || "")) return [value];
+  const out = [base];
+  try {
+    const u = new URL(base);
+    if (/\/originals\//i.test(u.pathname)) {
+      for (const size of ["1200x", "736x", "564x", "474x"]) {
+        out.push(new URL(u.toString().replace(/\/originals\//i, `/${size}/`)).toString());
+      }
+    }
+  } catch (_) {}
+  return [...new Set(out)];
+}
+
 async function runImageDownload(imageUrls, res, filenameFallback, refererUrl = null) {
   const urls = [...new Set((imageUrls || []).filter(validHttpUrl))].slice(0, 12);
   if (!urls.length) throw new Error("No public image was found in this post.");
@@ -182,25 +225,36 @@ async function runImageDownload(imageUrls, res, filenameFallback, refererUrl = n
   try {
     const files = [];
     for (let i = 0; i < urls.length; i++) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 20000);
-      try {
-        const r = await fetch(urls[i], { signal: controller.signal, headers: { "User-Agent": "Mozilla/5.0", ...(refererUrl ? { "Referer": refererUrl } : {}) } });
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const type = (r.headers.get("content-type") || "image/jpeg").split(";")[0].toLowerCase();
-        const ext = type === "image/png" ? "png" : type === "image/webp" ? "webp" : type === "image/gif" ? "gif" : "jpg";
-        const file = path.join(tempDir, `${String(i + 1).padStart(2, "0")}.${ext}`);
-        const buf = Buffer.from(await r.arrayBuffer());
-        await fs.promises.writeFile(file, buf);
-        files.push(file);
-      } finally { clearTimeout(timer); }
+      let saved = false;
+      let lastError = null;
+      for (const candidate of imageFetchCandidates(urls[i])) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 20000);
+        try {
+          const r = await fetch(candidate, { signal: controller.signal, headers: { "User-Agent": "Mozilla/5.0", "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8", ...(refererUrl ? { "Referer": refererUrl } : {}) } });
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const type = (r.headers.get("content-type") || "image/jpeg").split(";")[0].toLowerCase();
+          if (!type.startsWith("image/")) throw new Error(`Unexpected content type ${type}`);
+          const ext = type === "image/png" ? "png" : type === "image/webp" ? "webp" : type === "image/gif" ? "gif" : "jpg";
+          const file = path.join(tempDir, `${String(i + 1).padStart(2, "0")}.${ext}`);
+          const buf = Buffer.from(await r.arrayBuffer());
+          if (buf.length < 1000) throw new Error("Image response was too small");
+          await fs.promises.writeFile(file, buf);
+          files.push(file);
+          saved = true;
+          break;
+        } catch (e) {
+          lastError = e;
+        } finally { clearTimeout(timer); }
+      }
+      if (!saved) throw new Error(`Could not download image ${i + 1}${lastError ? `: ${lastError.message}` : ""}`);
     }
     if (files.length === 1) {
       const ext = path.extname(files[0]).toLowerCase() || ".jpg";
       const stat = await fs.promises.stat(files[0]);
       res.setHeader("Content-Type", ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg");
       res.setHeader("Content-Length", stat.size);
-      res.setHeader("Content-Disposition", `attachment; filename="${safeName}${ext}"`);
+      setAttachmentFilename(res, safeName, ext);
       return res.sendFile(files[0], async () => { await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {}); });
     }
     const zipPath = path.join(tempDir, `${safeName}.zip`);
@@ -212,7 +266,7 @@ async function runImageDownload(imageUrls, res, filenameFallback, refererUrl = n
     const stat = await fs.promises.stat(zipPath);
     res.setHeader("Content-Type", "application/zip");
     res.setHeader("Content-Length", stat.size);
-    res.setHeader("Content-Disposition", `attachment; filename="${safeName}.zip"`);
+    setAttachmentFilename(res, safeName, ".zip");
     res.sendFile(zipPath, async () => { await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {}); });
   } catch (e) {
     await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
@@ -310,7 +364,7 @@ async function runDownload(url, format, res, filenameFallback) {
 
     res.setHeader("Content-Type", "video/mp4");
     res.setHeader("Content-Length", stat.size);
-    res.setHeader("Content-Disposition", `attachment; filename="${safeName}.mp4"`);
+    setAttachmentFilename(res, safeName, ".mp4");
 
     res.sendFile(filePath, async (err) => {
       await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
@@ -372,14 +426,23 @@ app.post("/api/analyze", async (req, res) => {
     if (isImagePostUrl(url)) {
       let imageUrls = [];
       if (raw) {
-        imageUrls = [info.thumbnail, ...(Array.isArray(info.entries) ? info.entries.flatMap(e => [e?.thumbnail]) : [])].filter(Boolean);
+        const candidates = [
+          ...(Array.isArray(info.thumbnails) ? info.thumbnails.map(t => rankImageUrl(t?.url, t?.width, t?.height)) : []),
+          ...((Array.isArray(info.entries) ? info.entries : []).flatMap(e => [
+            ...(Array.isArray(e?.thumbnails) ? e.thumbnails.map(t => rankImageUrl(t?.url, t?.width, t?.height)) : []),
+            ...(e?.thumbnail ? [rankImageUrl(e.thumbnail)] : [])
+          ])),
+          ...(info.thumbnail ? [rankImageUrl(info.thumbnail)] : [])
+        ];
+        candidates.sort((a, b) => b.score - a.score);
+        imageUrls = candidates.map(x => x.url);
       }
       // Always inspect the public page as a second source. This is important
       // for Instagram photo posts/carousels because current yt-dlp can detect
       // the post but return no video formats for image-only entries.
       const pageImages = await extractPublicImageUrls(url).catch(() => []);
       const oembedImages = await extractInstagramOembedImage(url);
-      imageUrls = [...new Set([...imageUrls, ...pageImages, ...oembedImages])].slice(0, 12);
+      imageUrls = [...new Set([...imageUrls, ...pageImages, ...oembedImages].map(pinterestOriginalUrl))].slice(0, 12);
       const hasVideo = (info.formats || []).some(f => f.url && f.vcodec && f.vcodec !== "none");
       if (!hasVideo && imageUrls.length) {
         return res.json({
