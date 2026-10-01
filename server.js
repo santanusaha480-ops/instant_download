@@ -32,6 +32,59 @@ function isYouTubeUrl(value) {
   }
 }
 
+function isInstagramUrl(value) {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === "instagram.com" || host.endsWith(".instagram.com");
+  } catch { return false; }
+}
+
+function isPinterestUrl(value) {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === "pinterest.com" || host.endsWith(".pinterest.com") || host === "pin.it";
+  } catch { return false; }
+}
+
+function isImagePostUrl(value) {
+  return isInstagramUrl(value) || isPinterestUrl(value);
+}
+
+function decodeHtml(value) {
+  return String(value || "")
+    .replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+}
+
+async function extractOpenGraphImages(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  try {
+    const r = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml"
+      }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const html = await r.text();
+    const images = [];
+    const add = (u) => {
+      if (!u) return;
+      try {
+        const absolute = new URL(decodeHtml(u), url).toString();
+        if (/^https?:\/\//i.test(absolute) && !images.includes(absolute)) images.push(absolute);
+      } catch (_) {}
+    };
+    const metaRe = /<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image)["'][^>]+content=["']([^"']+)["'][^>]*>/gi;
+    let m; while ((m = metaRe.exec(html)) && images.length < 12) add(m[1]);
+    const reverseRe = /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:image|twitter:image)["'][^>]*>/gi;
+    while ((m = reverseRe.exec(html)) && images.length < 12) add(m[1]);
+    return images;
+  } finally { clearTimeout(timer); }
+}
+
 // YouTube has recently changed which player clients require bot/PO-token
 // checks. yt-dlp documents web_embedded as a supported client for videos that
 // are embeddable. We use it as a fallback; this does not authenticate or
@@ -54,6 +107,53 @@ function runYtDlp(args) {
     p.on("error", reject);
     p.on("close", code => code === 0 ? resolve(stdout) : reject(new Error(stderr || `yt-dlp exited ${code}`)));
   });
+}
+
+async function runImageDownload(imageUrls, res, filenameFallback) {
+  const urls = [...new Set((imageUrls || []).filter(validHttpUrl))].slice(0, 12);
+  if (!urls.length) throw new Error("No public image was found in this post.");
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "instant-images-"));
+  const safeName = String(filenameFallback || "instant-image")
+    .replace(/[\\/:*?"<>|\r\n]/g, "_").slice(0, 120) || "instant-image";
+  try {
+    const files = [];
+    for (let i = 0; i < urls.length; i++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 20000);
+      try {
+        const r = await fetch(urls[i], { signal: controller.signal, headers: { "User-Agent": "Mozilla/5.0" } });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const type = (r.headers.get("content-type") || "image/jpeg").split(";")[0].toLowerCase();
+        const ext = type === "image/png" ? "png" : type === "image/webp" ? "webp" : type === "image/gif" ? "gif" : "jpg";
+        const file = path.join(tempDir, `${String(i + 1).padStart(2, "0")}.${ext}`);
+        const buf = Buffer.from(await r.arrayBuffer());
+        await fs.promises.writeFile(file, buf);
+        files.push(file);
+      } finally { clearTimeout(timer); }
+    }
+    if (files.length === 1) {
+      const ext = path.extname(files[0]).toLowerCase() || ".jpg";
+      const stat = await fs.promises.stat(files[0]);
+      res.setHeader("Content-Type", ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg");
+      res.setHeader("Content-Length", stat.size);
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName}${ext}"`);
+      return res.sendFile(files[0], async () => { await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {}); });
+    }
+    const zipPath = path.join(tempDir, `${safeName}.zip`);
+    await new Promise((resolve, reject) => {
+      const p = spawn("zip", ["-q", zipPath, ...files], { cwd: tempDir, stdio: ["ignore", "pipe", "pipe"] });
+      let err = ""; p.stderr.on("data", d => err += d.toString());
+      p.on("error", reject); p.on("close", code => code === 0 ? resolve() : reject(new Error(err || "zip failed")));
+    });
+    const stat = await fs.promises.stat(zipPath);
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Length", stat.size);
+    res.setHeader("Content-Disposition", `attachment; filename="${safeName}.zip"`);
+    res.sendFile(zipPath, async () => { await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {}); });
+  } catch (e) {
+    await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    throw e;
+  }
 }
 
 async function runDownload(url, format, res, filenameFallback) {
@@ -181,30 +281,49 @@ app.post("/api/analyze", async (req, res) => {
     ];
 
     let raw;
-    try {
-      raw = await runYtDlp(analyzeArgs);
-    } catch (firstError) {
-      // If YouTube rejects the normal client with a bot-check, retry only
-      // with its supported embedded client. This works only for videos that
-      // YouTube makes embeddable; private/member-only content remains blocked.
-      const msg = String(firstError.message || firstError);
-      if (isYouTubeUrl(url) && /sign in to confirm|not a bot|bot|captcha|confirm you/i.test(msg)) {
+    if (isYouTubeUrl(url)) {
+      // Fast path: embedded client does not require a PO token and is much
+      // quicker. If the video is not embeddable, fall back to the PO-token path.
+      try {
         raw = await runYtDlp([
-          "--dump-single-json",
-          "--no-playlist",
-          "--no-warnings",
-          "--skip-download",
-          "--socket-timeout", "20",
-          "--js-runtimes", "deno",
-          "--remote-components", "ejs:github",
-          ...youtubeClientArgs(url, true),
-          url
+          "--dump-single-json", "--no-playlist", "--no-warnings", "--skip-download",
+          "--socket-timeout", "12", "--js-runtimes", "deno", "--remote-components", "ejs:github",
+          ...youtubeClientArgs(url, true), url
         ]);
-      } else {
-        throw firstError;
+      } catch (_) {
+        raw = await runYtDlp(analyzeArgs);
+      }
+    } else {
+      try {
+        raw = await runYtDlp(analyzeArgs);
+      } catch (firstError) {
+        // Image-only Instagram/Pinterest posts can be exposed as image metadata
+        // rather than video formats. We handle those with a public OpenGraph image fallback below.
+        if (!isImagePostUrl(url)) throw firstError;
+        raw = null;
       }
     }
-    const info = JSON.parse(raw);
+    const info = raw ? JSON.parse(raw) : { title: "Image post", thumbnail: null, formats: [] };
+
+    if (isImagePostUrl(url)) {
+      let imageUrls = [];
+      if (raw) {
+        imageUrls = [info.thumbnail, ...(Array.isArray(info.entries) ? info.entries.flatMap(e => [e?.thumbnail]) : [])].filter(Boolean);
+      }
+      if (!imageUrls.length) imageUrls = await extractOpenGraphImages(url);
+      imageUrls = [...new Set(imageUrls)].slice(0, 12);
+      const hasVideo = (info.formats || []).some(f => f.url && f.vcodec && f.vcodec !== "none");
+      if (!hasVideo && imageUrls.length) {
+        return res.json({
+          title: info.title || "Image post", thumbnail: imageUrls[0], duration: null,
+          uploader: info.uploader || info.channel || null, webpage_url: info.webpage_url || url,
+          extractor: info.extractor_key || info.extractor || (isInstagramUrl(url) ? "Instagram" : "Pinterest"),
+          media_type: "image", image_urls: imageUrls,
+          qualities: [{ label: imageUrls.length > 1 ? `Download ${imageUrls.length} images` : "Download image", format_id: "image", has_audio: false, has_video: false }],
+          formats: []
+        });
+      }
+    }
 
     if (info.duration && Number(info.duration) > MAX_SECONDS) {
       return res.status(413).json({ error: `Media is longer than the ${MAX_SECONDS}-second server limit.` });
@@ -270,6 +389,12 @@ app.post("/api/download", async (req, res) => {
   }
 
   try {
+    if (req.body.mediaType === "image") {
+      const imageUrls = Array.isArray(req.body.imageUrls) ? req.body.imageUrls : [];
+      if (!imageUrls.length) return res.status(400).json({ error: "No image was found for this post." });
+      await runImageDownload(imageUrls, res, String(req.body.title || "instant-image"));
+      return;
+    }
     let format;
     if (audioOnly) {
       format = "bestaudio";

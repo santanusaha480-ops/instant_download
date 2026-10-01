@@ -1,7 +1,7 @@
 FROM node:22-bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip ca-certificates curl unzip chromium \
+    && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip ca-certificates curl unzip chromium zip \
     && rm -rf /var/lib/apt/lists/*
 
 # Use pip-installed yt-dlp so its current Python plugin system is available.

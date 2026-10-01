@@ -25,9 +25,8 @@ button.primary:hover{background:var(--blue2)}
 .panel.show{display:block}.loading{text-align:center;padding:20px;color:var(--muted)}.spinner{width:24px;height:24px;border:3px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 10px}@keyframes spin{to{transform:rotate(360deg)}}
 .result{display:grid;grid-template-columns:1fr 1fr;gap:18px}.preview{background:var(--soft);border-radius:16px;padding:18px}.preview h3{margin:0 0 8px}.preview p{color:var(--muted);font-size:14px}
 .quality{display:flex;flex-direction:column;gap:10px}.quality button{height:46px;border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:12px;cursor:pointer;text-align:left;padding:0 14px;font-weight:700}.quality button:hover{border-color:var(--blue);color:var(--blue)}
-.features{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:42px}.feature{background:var(--card);border:1px solid var(--border);padding:20px;border-radius:18px}.icon{font-size:24px}.feature b{display:block;margin:10px 0 6px}.feature span{font-size:13px;color:var(--muted);line-height:1.5}
 footer{text-align:center;color:var(--muted);font-size:12px;padding:25px}
-@media(max-width:720px){header{padding:0 18px}.controls{grid-template-columns:1fr}.result{grid-template-columns:1fr}.features{grid-template-columns:1fr}main{padding-top:45px}}
+@media(max-width:720px){header{padding:0 18px}.controls{grid-template-columns:1fr}.result{grid-template-columns:1fr}main{padding-top:45px}}
 </style>
 </head>
 <body>
@@ -101,22 +100,24 @@ analyze.onclick=async()=>{
    document.getElementById('title').textContent='Could not analyze';
    document.getElementById('details').textContent=e.message;
    document.querySelector('.quality').innerHTML='';
-   setStatus('Try another public/authorized URL or a different YouTube video.',false);
+   setStatus('Try a public post/pin, or another public/authorized URL.',false);
  }
 };
 async function download(formatId,label,hasAudio){
  const url=document.getElementById('url').value.trim();
  setStatus(`Preparing ${label}…`);
  try{
-   const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,formatId,quality:label,hasAudio,title:mediaInfo?.title||'instant-download'})});
+   const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,formatId,quality:label,hasAudio,title:mediaInfo?.title||'instant-download',mediaType:mediaInfo?.media_type,imageUrls:mediaInfo?.image_urls||[]})});
    if(!r.ok){const e=await r.json().catch(()=>({})); throw new Error(e.error||'Download failed.');}
    const blob=await r.blob();
    const a=document.createElement('a');
    a.href=URL.createObjectURL(blob);
-   a.download=(mediaInfo?.title||'instant-download').replace(/[\\/:*?"<>|]/g,'_')+'.mp4';
+   const imageDownload=mediaInfo?.media_type==='image';
+   const ext=blob.type==='application/zip'?'.zip':(blob.type==='image/png'?'.png':blob.type==='image/webp'?'.webp':blob.type==='image/gif'?'.gif':imageDownload?'.jpg':'.mp4');
+   a.download=(mediaInfo?.title||'instant-download').replace(/[\\/:*?"<>|]/g,'_')+ext;
    document.body.appendChild(a);a.click();a.remove();
    URL.revokeObjectURL(a.href);
-   setStatus('Download started. Check your browser Downloads folder.');
+   setStatus(imageDownload ? 'Image download started. Check your browser Downloads folder.' : 'Download started. Check your browser Downloads folder.');
  }catch(e){setStatus(e.message,false);}
 }
 </script>

@@ -11,3 +11,10 @@ The app does not include or accept user account credentials/cookies. Private, me
 ## Deploy
 
 Use Railway with the repository root `/` and Dockerfile builder. Push these files to GitHub and redeploy.
+
+
+## Image posts
+Instagram and Pinterest image posts now use a public OpenGraph image fallback when the video extractor exposes no video formats. Single images download directly; multiple public images are returned as a ZIP.
+
+## YouTube speed
+YouTube analysis tries the `web_embedded` client first because it does not require a PO token; it falls back to the PO-token path when needed. YouTube can still be slower when the fallback is required.
