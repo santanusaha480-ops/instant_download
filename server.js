@@ -50,116 +50,6 @@ function isPinterestUrl(value) {
 function isImagePostUrl(value) {
   return isInstagramUrl(value) || isPinterestUrl(value);
 }
-function isGoogleDriveUrl(value) {
-  try {
-    const u = new URL(value);
-    const host = u.hostname.toLowerCase();
-    return host === "drive.google.com" || host === "docs.google.com" || host === "drive.usercontent.google.com";
-  } catch { return false; }
-}
-
-function extractGoogleDriveFileId(value) {
-  try {
-    const u = new URL(value);
-    const host = u.hostname.toLowerCase();
-    if (!/drive\.google\.com|docs\.google\.com|drive\.usercontent\.google\.com/.test(host)) return null;
-    const qid = u.searchParams.get('id');
-    if (qid && /^[A-Za-z0-9_-]{10,}$/.test(qid)) return qid;
-    const m = u.pathname.match(/\/file\/d\/([A-Za-z0-9_-]+)/i) || u.pathname.match(/\/document\/d\/([A-Za-z0-9_-]+)/i);
-    return m ? m[1] : null;
-  } catch { return null; }
-}
-
-function googleDriveDownloadUrl(fileId) {
-  return `https://drive.usercontent.google.com/download?id=${encodeURIComponent(fileId)}&export=download&confirm=t`;
-}
-
-async function fetchGoogleDriveResponse(fileId, originalUrl) {
-  const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36',
-    'Accept': '*/*'
-  };
-  let r = await fetch(googleDriveDownloadUrl(fileId), { headers, redirect: 'follow' });
-  const ct = String(r.headers.get('content-type') || '').toLowerCase();
-  if (r.ok && !ct.includes('text/html')) return r;
-
-  // Large public Drive files can return an HTML confirmation page. Extract the
-  // confirmation link/token and retry it rather than handing HTML to the user.
-  if (ct.includes('text/html')) {
-    const html = await r.text();
-    const patterns = [
-      /href="([^"]*confirm=[^"]+)"/i,
-      /href='([^']*confirm=[^']+)'/i,
-      /action="([^"]+)"/i
-    ];
-    for (const re of patterns) {
-      const m = html.match(re);
-      if (!m) continue;
-      let next = decodeHtml(m[1]).replace(/\\u003d/g, '=').replace(/&amp;/g, '&');
-      if (next.startsWith('/')) next = `https://drive.google.com${next}`;
-      if (!/^https?:\/\//i.test(next)) continue;
-      const rr = await fetch(next, { headers, redirect: 'follow' });
-      const rct = String(rr.headers.get('content-type') || '').toLowerCase();
-      if (rr.ok && !rct.includes('text/html')) return rr;
-    }
-  }
-  return r;
-}
-
-async function analyzeGoogleDrive(url) {
-  const fileId = extractGoogleDriveFileId(url);
-  if (!fileId) return null;
-  const r = await fetchGoogleDriveResponse(fileId, url);
-  const ct = String(r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-  const cd = r.headers.get('content-disposition') || '';
-  const len = Number(r.headers.get('content-length') || 0);
-  const isMedia = ct.startsWith('image/') || ct.startsWith('video/');
-  if (!r.ok || !isMedia) {
-    try { await r.body?.cancel(); } catch (_) {}
-    return null;
-  }
-  try { await r.body?.cancel(); } catch (_) {}
-  const filenameMatch = cd.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
-  let filename = filenameMatch ? decodeURIComponent(filenameMatch[1] || filenameMatch[2]) : '';
-  if (!filename) filename = `google-drive-${fileId}`;
-  return { fileId, contentType: ct, size: len, filename, mediaType: ct.startsWith('video/') ? 'video' : 'image' };
-}
-
-async function downloadGoogleDrive(url, res, fallbackName) {
-  const fileId = extractGoogleDriveFileId(url);
-  if (!fileId) throw new Error('Invalid Google Drive file link.');
-  const r = await fetchGoogleDriveResponse(fileId, url);
-  const ct = String(r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-  if (!r.ok || !(ct.startsWith('image/') || ct.startsWith('video/'))) {
-    try { await r.body?.cancel(); } catch (_) {}
-    throw new Error('Google Drive did not provide a downloadable image or video. Make sure the file is shared and downloads are allowed.');
-  }
-  const cd = r.headers.get('content-disposition') || '';
-  const match = cd.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
-  let filename = match ? decodeURIComponent(match[1] || match[2]) : '';
-  if (!filename) {
-    const ext = ct.split('/')[1] || 'bin';
-    filename = `${String(fallbackName || 'google-drive-file').replace(/[^a-zA-Z0-9._-]+/g, '_')}.${ext}`;
-  }
-  setAttachmentFilename(res, filename);
-  res.setHeader('Content-Type', ct);
-  const len = r.headers.get('content-length');
-  if (len) res.setHeader('Content-Length', len);
-  if (!r.body) throw new Error('Google Drive returned an empty file.');
-  const reader = r.body.getReader();
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (!res.write(Buffer.from(value))) await new Promise(resolve => res.once('drain', resolve));
-    }
-    res.end();
-  } catch (e) {
-    try { await reader.cancel(); } catch (_) {}
-    throw e;
-  }
-}
-
 
 function decodeHtml(value) {
   return String(value || "")
@@ -858,30 +748,6 @@ app.post("/api/analyze", async (req, res) => {
   if (!validHttpUrl(url)) return res.status(400).json({ error: "Enter a valid http/https URL." });
 
   try {
-    // Google Drive public/shared image and video links are handled directly.
-    // This avoids sending Drive's HTML viewer page through yt-dlp and preserves
-    // the original uploaded file when the link grants download access.
-    if (isGoogleDriveUrl(url)) {
-      const drive = await analyzeGoogleDrive(url);
-      if (!drive) {
-        return res.status(400).json({
-          error: "Could not access this Google Drive file. Make sure the file is shared with link access and downloading is allowed."
-        });
-      }
-      const label = drive.mediaType === 'video' ? 'Original video' : 'Original image';
-      return res.json({
-        title: drive.filename || 'Google Drive file',
-        thumbnail: null,
-        duration: null,
-        uploader: 'Google Drive',
-        webpage_url: url,
-        extractor: 'Google Drive',
-        media_type: drive.mediaType,
-        qualities: [{ label, format_id: 'google-drive-original', has_audio: false, has_video: drive.mediaType === 'video' }],
-        formats: []
-      });
-    }
-
     const analyzeArgs = [
       "--dump-single-json",
       "--no-playlist",
@@ -1035,10 +901,6 @@ app.post("/api/download", async (req, res) => {
   }
 
   try {
-    if (isGoogleDriveUrl(url) || req.body.mediaType === 'google-drive') {
-      await downloadGoogleDrive(url, res, String(req.body.title || 'google-drive-file'));
-      return;
-    }
     if (req.body.mediaType === "image") {
       const imageUrls = Array.isArray(req.body.imageUrls) ? req.body.imageUrls : [];
       if (!imageUrls.length) return res.status(400).json({ error: "No image was found for this post." });

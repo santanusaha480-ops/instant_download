@@ -39,7 +39,7 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:25px}
 <div class="box">
 <div class="controls">
 <input id="url" type="url" placeholder="Paste your media link here…" autocomplete="off">
-<select id="source"><option value="auto">Auto detect</option><option>YouTube</option><option>Instagram</option><option>Pinterest</option><option>Google Drive</option><option>Direct file</option></select>
+<select id="source"><option value="auto">Auto detect</option><option>YouTube</option><option>Instagram</option><option>Pinterest</option><option>Direct file</option></select>
 <button class="primary" id="analyze">Analyze</button>
 </div>
 <div class="note">Only download content you own or have permission to save. Platform restrictions and copyright rules still apply.</div>
@@ -107,13 +107,13 @@ async function download(formatId,label,hasAudio,audioOnly=false){
  const url=document.getElementById('url').value.trim();
  setStatus(`Preparing ${label}…`);
  try{
-   const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,formatId,quality:label,hasAudio,audioOnly,title:mediaInfo?.title||'instant-download',mediaType:mediaInfo?.media_type==='image'?'image':(mediaInfo?.extractor==='Google Drive'?'google-drive':mediaInfo?.media_type),imageUrls:mediaInfo?.image_urls||[]})});
+   const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,formatId,quality:label,hasAudio,audioOnly,title:mediaInfo?.title||'instant-download',mediaType:mediaInfo?.media_type,imageUrls:mediaInfo?.image_urls||[]})});
    if(!r.ok){const e=await r.json().catch(()=>({})); throw new Error(e.error||'Download failed.');}
    const blob=await r.blob();
    const a=document.createElement('a');
    a.href=URL.createObjectURL(blob);
    const imageDownload=mediaInfo?.media_type==='image';
-   const ext=blob.type==='application/zip'?'.zip':(blob.type==='image/png'?'.png':blob.type==='image/webp'?'.webp':blob.type==='image/gif'?'.gif':blob.type==='image/jpeg'?'.jpg':blob.type==='video/webm'?'.webm':imageDownload?'.jpg':'.mp4');
+   const ext=blob.type==='application/zip'?'.zip':(blob.type==='image/png'?'.png':blob.type==='image/webp'?'.webp':blob.type==='image/gif'?'.gif':imageDownload?'.jpg':'.mp4');
    a.download=(mediaInfo?.title||'instant-download').replace(/[\\/:*?"<>|]/g,'_')+ext;
    document.body.appendChild(a);a.click();a.remove();
    URL.revokeObjectURL(a.href);

@@ -28,8 +28,3 @@ Environment:
 - `MAX_CAROUSEL_ITEMS` — default 50.
 
 No Instagram credentials or cookies are accepted by the app.
-
-
-## Google Drive
-
-Public/shared Google Drive links for image and video files are supported. The file must be accessible to the user and have downloading allowed; the app does not bypass Drive permissions or download restrictions. Google Drive provides browser/API download mechanisms for files when the requester has download access.
