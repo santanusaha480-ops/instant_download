@@ -36,7 +36,7 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:25px}
 <section class="hero">
 <div class="badge">Fast • Simple • No account</div>
 <h1>Download your <span>authorized</span> media.</h1>
-<p>Paste a supported direct media link, choose its source and inspect available quality options. Designed for a clean mobile-first experience.</p>
+<p>Paste a supported media link, analyze it, choose an available quality, and save it.</p>
 <div class="box">
 <div class="controls">
 <input id="url" type="url" placeholder="Paste your media link here…" autocomplete="off">
@@ -58,11 +58,7 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:25px}
 </div>
 </div>
 </section>
-<section class="features">
-<div class="feature"><div class="icon">⚡</div><b>Simple workflow</b><span>Paste → analyze → choose an available quality → save.</span></div>
-<div class="feature"><div class="icon">📱</div><b>Mobile friendly</b><span>Responsive controls designed for phones, tablets and desktop browsers.</span></div>
-<div class="feature"><div class="icon">🌓</div><b>Light & dark</b><span>Switch appearance instantly and keep your preference on the device.</span></div>
-</section>
+
 </main>
 <footer>Instant Download UI prototype • No login required • Use only with content you are authorized to download.</footer>
 <script>
@@ -96,7 +92,7 @@ analyze.onclick=async()=>{
      const b=document.createElement('button');
      b.dataset.format=item.format_id;
      b.textContent=item.label;
-     b.onclick=()=>download(item.label);
+     b.onclick=()=>download(item.format_id,item.label,item.has_audio);
      q.appendChild(b);
    });
    if(!q.children.length) setStatus('No downloadable formats were returned.',false);
@@ -105,14 +101,14 @@ analyze.onclick=async()=>{
    document.getElementById('title').textContent='Could not analyze';
    document.getElementById('details').textContent=e.message;
    document.querySelector('.quality').innerHTML='';
-   setStatus('Try another public/authorized media URL.',false);
+   setStatus('Try another public/authorized URL or a different YouTube video.',false);
  }
 };
-async function download(label){
+async function download(formatId,label,hasAudio){
  const url=document.getElementById('url').value.trim();
  setStatus(`Preparing ${label}…`);
  try{
-   const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,quality:label,title:mediaInfo?.title||'instant-download'})});
+   const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,formatId,quality:label,hasAudio,title:mediaInfo?.title||'instant-download'})});
    if(!r.ok){const e=await r.json().catch(()=>({})); throw new Error(e.error||'Download failed.');}
    const blob=await r.blob();
    const a=document.createElement('a');

@@ -1,13 +1,13 @@
-# Instant Download
+# Instant Download — Railway
 
-Railway-ready Node/Express media downloader using yt-dlp, FFmpeg and Deno.
+Full-stack Node/Express + yt-dlp + FFmpeg media downloader for public/authorized content.
 
-## Instagram audio behavior
-For an Instagram post/Reel, the downloader uses only streams exposed by the same post URL. It does not generate or substitute an audio track. Video formats are selected with yt-dlp's conditional `+?bestaudio` behavior so a format that already contains the post audio is not given a duplicate audio stream. FFmpeg merges separate video/audio streams into MP4 when needed.
+## YouTube
 
-Use only content you own or are authorized to download. Platform restrictions still apply.
+The container installs Deno plus the current `yt-dlp` Python package and the official yt-dlp-recommended `yt-dlp-getpot-wpc` PO-token provider. The provider uses Chromium to mint YouTube WebPoClient tokens when yt-dlp requests them. This can improve compatibility with current YouTube bot/PO-token checks, but YouTube may still reject requests based on IP, video availability, account state, or other platform controls.
 
+The app does not include or accept user account credentials/cookies. Private, members-only, DRM-protected, or otherwise restricted media is not promised to work.
 
-### YouTube availability note
+## Deploy
 
-YouTube currently applies changing bot checks and Proof of Origin (PO) token requirements to some player clients. This build uses yt-dlp's supported `default,web_embedded,-android_vr` client configuration and, when a bot-check error is detected during analysis, retries with `web_embedded`. The embedded client only works for videos that YouTube makes embeddable; private, members-only, age/account-restricted, or otherwise unavailable content may still fail. yt-dlp documents that some YouTube clients require PO tokens and that `web_embedded` is limited to embeddable videos.
+Use Railway with the repository root `/` and Dockerfile builder. Push these files to GitHub and redeploy.

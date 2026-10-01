@@ -38,9 +38,11 @@ function isYouTubeUrl(value) {
 // bypass private/member-only content.
 function youtubeClientArgs(url, embeddedOnly = false) {
   if (!isYouTubeUrl(url)) return [];
-  return ["--extractor-args", embeddedOnly
-    ? "youtube:player_client=web_embedded"
-    : "youtube:player_client=default,web_embedded,-android_vr"];
+  const clients = embeddedOnly ? "web_embedded" : "web,mweb,web_embedded";
+  return [
+    "--extractor-args", `youtube:player_client=${clients}`,
+    "--extractor-args", `youtubepot-wpc:browser_path=${process.env.YTDLP_CHROME_PATH || "/usr/bin/chromium"}`
+  ];
 }
 
 function runYtDlp(args) {
