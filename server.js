@@ -107,6 +107,102 @@ function rankImageUrl(value, width = 0, height = 0) {
   return { url: u, score: w * h + (/\/originals\//i.test(u) ? 1e12 : 0) };
 }
 
+
+function instagramPostCode(value) {
+  try {
+    const u = new URL(value);
+    const m = u.pathname.match(/\/(?:p|reel|reels|tv)\/([^/]+)/i);
+    return m ? m[1] : null;
+  } catch (_) { return null; }
+}
+
+async function extractInstagramGraphOembed(url) {
+  if (!isInstagramUrl(url)) return [];
+  const endpoints = [
+    "https://graph.facebook.com/v26.0/instagram_oembed",
+    "https://graph.facebook.com/v25.0/instagram_oembed"
+  ];
+  for (const endpoint of endpoints) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 7000);
+    try {
+      const r = await fetch(`${endpoint}?url=${encodeURIComponent(url)}&maxwidth=1080`, {
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+          "Accept": "application/json,text/plain,*/*"
+        }
+      });
+      if (!r.ok) continue;
+      const data = await r.json();
+      const out = [];
+      if (data?.thumbnail_url) out.push(data.thumbnail_url);
+      if (typeof data?.html === "string") {
+        const re = /https?:\\?\/\\?\/[^\"'<>\s]+/g;
+        for (const m of data.html.matchAll(re)) out.push(m[0].replace(/\\\//g, "/"));
+      }
+      if (out.length) return [...new Set(out)];
+    } catch (_) {
+      // Try the next public oEmbed API version.
+    } finally { clearTimeout(timer); }
+  }
+  return [];
+}
+
+async function extractInstagramEmbedImages(url) {
+  if (!isInstagramUrl(url)) return [];
+  const code = instagramPostCode(url);
+  if (!code) return [];
+  const candidates = [
+    `https://www.instagram.com/p/${encodeURIComponent(code)}/embed/captioned/`,
+    `https://www.instagram.com/p/${encodeURIComponent(code)}/embed/`
+  ];
+  for (const endpoint of candidates) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 9000);
+    try {
+      const r = await fetch(endpoint, {
+        signal: controller.signal,
+        redirect: "follow",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Referer": url
+        }
+      });
+      if (!r.ok) continue;
+      const html = await r.text();
+      const out = [];
+      const add = (v) => {
+        if (!v) return;
+        let x = String(v).replace(/\\\//g, "/").replace(/\\u0026/gi, "&").replace(/\\u003d/gi, "=");
+        x = decodeHtml(x);
+        try { x = new URL(x, endpoint).toString(); } catch (_) { return; }
+        if (/^https?:\/\//i.test(x) && /(?:cdninstagram|fbcdn|scontent)/i.test(x)) {
+          if (!out.includes(x)) out.push(x);
+        }
+      };
+      const patterns = [
+        /<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image)["'][^>]+content=["']([^"']+)["'][^>]*>/gi,
+        /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:image|twitter:image)["'][^>]*>/gi,
+        /"display_url"\s*:\s*"((?:\\.|[^"\\])+)"/g,
+        /"thumbnail_src"\s*:\s*"((?:\\.|[^"\\])+)"/g,
+        /<img[^>]+src=["']([^"']+)["'][^>]*>/gi,
+        /background-image:\s*url\((?:["']?)(https?:[^)"']+)/gi
+      ];
+      for (const re of patterns) {
+        let m;
+        while ((m = re.exec(html)) && out.length < 30) add(m[1]);
+      }
+      if (out.length) return out;
+    } catch (_) {
+      // Try the next embed URL.
+    } finally { clearTimeout(timer); }
+  }
+  return [];
+}
+
 async function extractPublicImageUrls(url) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
@@ -277,23 +373,22 @@ async function runImageDownload(imageUrls, res, filenameFallback, refererUrl = n
 async function runDownload(url, format, res, filenameFallback) {
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "instant-download-"));
   const outputTemplate = path.join(tempDir, "media.%(ext)s");
-  const baseArgs = [
+  const commonArgs = [
     "--no-playlist",
     "--no-warnings",
     "--merge-output-format", "mp4",
-    "--recode-video", "mp4",
     "--force-overwrites",
-    "--socket-timeout", "30",
-    "--retries", "3",
-    "--fragment-retries", "3",
+    "--socket-timeout", isYouTubeUrl(url) ? "18" : "30",
+    "--retries", isYouTubeUrl(url) ? "2" : "3",
+    "--fragment-retries", isYouTubeUrl(url) ? "2" : "3",
     "--js-runtimes", "deno",
     "--remote-components", "ejs:github",
-    ...youtubeClientArgs(url),
     "-o", outputTemplate,
   ];
 
-  async function execute(selector) {
-    const args = ["-f", selector, ...baseArgs, url];
+  async function execute(selector, youtubeFast = false) {
+    const ytArgs = isYouTubeUrl(url) ? youtubeClientArgs(url, youtubeFast) : [];
+    const args = ["-f", selector, ...commonArgs, ...ytArgs, url];
     return await new Promise((resolve, reject) => {
       const p = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
       let stderr = "", stdout = "";
@@ -336,10 +431,16 @@ async function runDownload(url, format, res, filenameFallback) {
     // First use the requested selector. If it produces a video without an
     // audio stream, retry with the site's best combined A/V representation.
     try {
-      await execute(format);
+      // YouTube: try the no-PO-token embedded client first. It is substantially
+      // faster when the video is embeddable. Fall back to the PO-token clients
+      // only if the fast path cannot download this particular video.
+      await execute(format, isYouTubeUrl(url));
     } catch (firstError) {
-      await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
-      throw firstError;
+      if (!isYouTubeUrl(url)) throw firstError;
+      for (const name of await fs.promises.readdir(tempDir)) {
+        await fs.promises.rm(path.join(tempDir, name), { recursive: true, force: true }).catch(() => {});
+      }
+      await execute(format, false);
     }
 
     let filePath = await findMp4WithAudio();
@@ -349,7 +450,7 @@ async function runDownload(url, format, res, filenameFallback) {
       for (const name of await fs.promises.readdir(tempDir)) {
         await fs.promises.rm(path.join(tempDir, name), { force: true }).catch(() => {});
       }
-      await execute("best[hasvid][hasaud]/best");
+      await execute("best[hasvid][hasaud]/best", false);
       filePath = await findMp4WithAudio();
     }
 
@@ -440,9 +541,17 @@ app.post("/api/analyze", async (req, res) => {
       // Always inspect the public page as a second source. This is important
       // for Instagram photo posts/carousels because current yt-dlp can detect
       // the post but return no video formats for image-only entries.
+      const graphOembedImages = isInstagramUrl(url) ? await extractInstagramGraphOembed(url).catch(() => []) : [];
+      const embedImages = isInstagramUrl(url) ? await extractInstagramEmbedImages(url).catch(() => []) : [];
       const pageImages = await extractPublicImageUrls(url).catch(() => []);
-      const oembedImages = await extractInstagramOembedImage(url);
-      imageUrls = [...new Set([...imageUrls, ...pageImages, ...oembedImages].map(pinterestOriginalUrl))].slice(0, 12);
+      const legacyOembedImages = await extractInstagramOembedImage(url);
+      imageUrls = [...new Set([
+        ...graphOembedImages,
+        ...embedImages,
+        ...imageUrls,
+        ...pageImages,
+        ...legacyOembedImages
+      ].map(pinterestOriginalUrl))].slice(0, 12);
       const hasVideo = (info.formats || []).some(f => f.url && f.vcodec && f.vcodec !== "none");
       if (!hasVideo && imageUrls.length) {
         return res.json({
@@ -533,7 +642,9 @@ app.post("/api/download", async (req, res) => {
       const h = Number(String(quality).replace("p", ""));
       // Explicitly request video + the best audio stream exposed by THIS
       // Instagram post, with a combined A/V fallback at the same height.
-      format = `bestvideo*[height<=${h}]+?bestaudio/best[height<=${h}]/best`;
+      format = isYouTubeUrl(url)
+        ? `bestvideo*[height<=${h}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${h}][ext=mp4]/best[height<=${h}]`
+        : `bestvideo*[height<=${h}]+?bestaudio/best[height<=${h}]/best`;
     } else if (formatId) {
       // The format id comes from this exact post's extractor result. Always
       // pair video-only formats with audio from the same post. Do not use
@@ -542,7 +653,9 @@ app.post("/api/download", async (req, res) => {
         ? String(formatId)
         : `${String(formatId || "bestvideo*")}+?bestaudio/best`;
     } else {
-      format = "bestvideo*+?bestaudio/best";
+      format = isYouTubeUrl(url)
+        ? "bestvideo*[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+        : "bestvideo*+?bestaudio/best";
     }
 
     const title = String(req.body.title || "instant-download");

@@ -1,17 +1,13 @@
-# Instant Download — Railway-ready v8
+# Instant Download — Railway-ready v9
 
-Full-stack Node/Express + yt-dlp + FFmpeg media downloader for public/authorized media.
+This build keeps the working Pinterest fixes and improves Instagram image-post extraction and YouTube download speed.
 
-## v8 fixes
-- Pinterest video downloads: fixes `Invalid character in header content [Content-Disposition]` when a pin title contains emoji or other Unicode characters. Downloads now use RFC 5987 UTF-8 filenames with an ASCII fallback.
-- Pinterest image quality: prefers Pinterest `originals` CDN URLs when available instead of 236x/474x/736x preview images, with automatic size fallbacks if the original URL is unavailable.
-- Pinterest image downloads validate the returned content type and retry alternate CDN sizes.
-- Existing Instagram photo/carousel and YouTube fixes remain.
+## v9 changes
+- Instagram photo posts: public Meta Graph oEmbed fallback (tokenless public oEmbed), Instagram embed-page fallback, page metadata fallback.
+- Instagram image-only posts no longer depend on yt-dlp returning video formats.
+- YouTube analysis/download: `web_embedded` is tried first; the slower PO-token provider path is only used when the fast client cannot handle the video.
+- YouTube download format selection prefers MP4 video + M4A audio to avoid unnecessary video recoding.
+- Pinterest video/image fixes from v8 are retained, including safe UTF-8 attachment filenames and high-quality image selection.
 
-## Deploy on Railway
-- Root directory: `/`
-- Builder: Dockerfile
-- Push the repository and let Railway redeploy.
-
-## Scope
-Only public/authorized media is supported. Private, login-only, DRM-protected, paywalled, or authentication-bypassing downloads are not promised.
+## Limits
+Only public/authorized media is supported. No private-account, members-only, DRM, credential, or cookie bypass is included.
